@@ -2,14 +2,21 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import path from "path";
+import { fileURLToPath } from "url";
 
 dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Fallback logic requires checking if key exists, but VITE_GEMINI_API_KEY is what the user wrote. 
-// We will use both process.env.GEMINI_API_KEY and process.env.VITE_GEMINI_API_KEY
+// Serve static files from the React app
+app.use(express.static(path.join(__dirname, "dist")));
+
 const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
 const genAI = new GoogleGenerativeAI(apiKey || "DUMMY_KEY");
 
@@ -85,4 +92,11 @@ User Input: "${prompt}"
   }
 });
 
-app.listen(3000, () => console.log("Server running on 3000"));
+// The "catchall" handler: for any request that doesn't
+// match one above, send back React's index.html file.
+app.use((req, res) => {
+  res.sendFile(path.join(__dirname, "dist", "index.html"));
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
