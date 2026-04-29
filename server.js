@@ -29,52 +29,58 @@ app.post("/api/ask", async (req, res) => {
   try {
     if (!apiKey) throw new Error("No API Key");
 
-    const { prompt, mode } = req.body;
+    const { prompt, mode, language = "English" } = req.body;
 
     const model = genAI.getGenerativeModel({
-      model: "gemini-1.5-pro"
+      model: "gemini-3.1-flash-lite-preview",
+      generationConfig: {
+        responseMimeType: "application/json",
+      }
     });
 
-    const system = `
-You are VotePath AI, an assistant explaining the Indian election process.
+    const promptText = `
+You are VotePath AI, an official assistant explaining the Indian election process.
+You must reply ENTIRELY in the following language: ${language}.
 
-CRITICAL RULES:
-1. ONLY answer questions related to Indian elections, voting, voter ID, eligibility, or the political process.
-2. If the user asks something completely unrelated (like math, coding, general knowledge, etc.), you MUST reply with this exact JSON:
+CRITICAL INSTRUCTIONS:
+1. You MUST ALWAYS output valid JSON.
+2. If the user's input is NOT about Indian elections, voting, voter ID, or eligibility (for example, if they ask about math like "2+2", coding, cooking, or general knowledge), you MUST return this exact JSON structure (translated to ${language}):
 {
   "title": "Off-topic Question",
   "simple": "I can only answer questions related to the Indian election process and voting. Please ask me about elections!",
   "source": "VotePath AI"
 }
-3. Always respond in valid JSON format.
-4. Structure for valid election questions:
+
+3. If the user's input IS about elections, answer it using this JSON structure:
 {
   "title": "Main topic",
   "steps": [{"title":"Step 1", "desc":"Description"}],
-  "simple": "A very simple explanation.",
+  "simple": "A simple summary.",
   "tips": ["Tip 1", "Tip 2"],
   "source": "Election Commission of India"
 }
-5. Keep language simple.
-6. If mode = "elis", simplify like explaining to a 10-year-old.
+
+4. Translate ALL content (titles, descriptions, tips, simple) to ${language}.
+5. Keep the JSON keys (title, steps, simple, tips, source, desc) exactly as written in English.
+6. If mode is "elis", simplify the explanation like explaining to a 10-year-old child.
+
+User Input: "${prompt}"
 `;
 
-    const result = await model.generateContent(system + "\nUser: " + prompt);
+    const result = await model.generateContent(promptText);
     const text = result.response.text();
 
-    if (!text.includes("{")) {
-      return res.json({ fallback: defaultResponse });
-    }
-
-    // Clean markdown from JSON response if present
-    const cleanText = text.replace(/```json/g, '').replace(/```/g, '').trim();
-
-    res.json({ raw: cleanText });
+    res.json({ raw: text });
   } catch (e) {
     console.error("AI Error:", e.message);
+    const language = req.body.language || "English";
     res.status(500).json({
       error: "AI unavailable",
-      fallback: defaultResponse
+      fallback: {
+        title: "Connection Error",
+        simple: `There was an error connecting to the AI (${e.message}). Please try again later. Language requested: ${language}.`,
+        source: "System"
+      }
     });
   }
 });

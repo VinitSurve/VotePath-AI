@@ -2,6 +2,7 @@ import React, { Suspense } from 'react';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { ExplainProvider } from './context/ExplainContext';
 import Layout from './components/Layout';
+import PageWrapper from './components/PageWrapper';
 import Home from './pages/Home';
 
 // Lazy loading pages for performance optimization
@@ -26,13 +27,13 @@ export default function App() {
         }>
           <Routes>
             <Route path="/" element={<Layout />}>
-              <Route index element={<Home />} />
-              <Route path="journey" element={<Journey />} />
-              <Route path="timeline" element={<TimelinePage />} />
-              <Route path="chat" element={<Chat />} />
-              <Route path="eligibility" element={<Eligibility />} />
-              <Route path="simulation" element={<Simulation />} />
-              <Route path="learn-fast" element={<LearnFast />} />
+              <Route index element={<PageWrapper><Home /></PageWrapper>} />
+              <Route path="journey" element={<PageWrapper><Journey /></PageWrapper>} />
+              <Route path="timeline" element={<PageWrapper><TimelinePage /></PageWrapper>} />
+              <Route path="chat" element={<PageWrapper><Chat /></PageWrapper>} />
+              <Route path="eligibility" element={<PageWrapper><Eligibility /></PageWrapper>} />
+              <Route path="simulation" element={<PageWrapper><Simulation /></PageWrapper>} />
+              <Route path="learn-fast" element={<PageWrapper><LearnFast /></PageWrapper>} />
             </Route>
           </Routes>
         </Suspense>

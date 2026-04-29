@@ -5,6 +5,13 @@ import tailwindcss from '@tailwindcss/vite'
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  server: {
+    port: 5763,
+    host: true,
+    watch: {
+      usePolling: true
+    }
+  },
   test: {
     environment: 'jsdom',
     globals: true,
