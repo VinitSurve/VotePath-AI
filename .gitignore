@@ -24,5 +24,3 @@ dist-ssr
 *.sw?
 
 .env
-ai.js
-server.js

@@ -17,7 +17,7 @@ app.use(express.json());
 // Serve static files from the React app
 app.use(express.static(path.join(__dirname, "dist")));
 
-const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
+const apiKey = process.env.GEMINI_API_KEY;
 const genAI = new GoogleGenerativeAI(apiKey || "DUMMY_KEY");
 
 const defaultResponse = {
@@ -32,52 +32,67 @@ const defaultResponse = {
   source: "Election Commission of India"
 };
 
+const requestLog = new Map();
+
 app.post("/api/ask", async (req, res) => {
   try {
+    const userIP = req.ip;
+    const now = Date.now();
+
+    if (requestLog.has(userIP)) {
+      const lastRequest = requestLog.get(userIP);
+      if (now - lastRequest < 2000) {
+        return res.status(429).json({
+          error: "Too many requests. Please wait a few seconds.",
+          fallback: { simple: "Too many requests. Please wait a few seconds.", source: "System" }
+        });
+      }
+    }
+    requestLog.set(userIP, now);
+
     if (!apiKey) throw new Error("No API Key");
 
     const { prompt, mode, language = "English" } = req.body;
+    
+    // Input sanitization
+    if (!prompt || typeof prompt !== 'string') {
+      return res.status(400).json({ error: "Invalid prompt format" });
+    }
+    if (prompt.length > 500) {
+      return res.status(400).json({ error: "Prompt too long (max 500 characters)" });
+    }
 
     const model = genAI.getGenerativeModel({
       model: "gemini-3.1-flash-lite-preview",
       generationConfig: {
         responseMimeType: "application/json",
+        temperature: 0.3,
+        maxOutputTokens: 512,
       }
     });
 
-    const promptText = `
-You are VotePath AI, an official assistant explaining the Indian election process.
-You must reply ENTIRELY in the following language: ${language}.
+    const promptText = `You are VotePath AI, an assistant for the Indian election process.
+Respond ONLY in ${language}. Return STRICT JSON.${mode === "elis" ? " Simplify for a 10-year-old." : ""}
 
-CRITICAL INSTRUCTIONS:
-1. You MUST ALWAYS output valid JSON.
-2. If the user's input is NOT about Indian elections, voting, voter ID, or eligibility (for example, if they ask about math like "2+2", coding, cooking, or general knowledge), you MUST return this exact JSON structure (translated to ${language}):
-{
-  "title": "Off-topic Question",
-  "simple": "I can only answer questions related to the Indian election process and voting. Please ask me about elections!",
-  "source": "VotePath AI"
-}
+Rules:
+- If NOT about Indian elections → return: {"title":"Off-topic Question","simple":"I can only answer questions about Indian elections and voting.","source":"VotePath AI"}
+- If about elections → return: {"title":"Topic","steps":[{"title":"Step","desc":"Description"}],"simple":"Short summary","tips":["Tip"],"source":"Election Commission of India"}
+- Keep keys in English. Translate ALL values to ${language}.
+- Keep responses under 120 words.
 
-3. If the user's input IS about elections, answer it using this JSON structure:
-{
-  "title": "Main topic",
-  "steps": [{"title":"Step 1", "desc":"Description"}],
-  "simple": "A simple summary.",
-  "tips": ["Tip 1", "Tip 2"],
-  "source": "Election Commission of India"
-}
-
-4. Translate ALL content (titles, descriptions, tips, simple) to ${language}.
-5. Keep the JSON keys (title, steps, simple, tips, source, desc) exactly as written in English.
-6. If mode is "elis", simplify the explanation like explaining to a 10-year-old child.
-
-User Input: "${prompt}"
-`;
+User: "${prompt}"`;
 
     const result = await model.generateContent(promptText);
     const text = result.response.text();
 
-    res.json({ raw: text });
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = defaultResponse;
+    }
+
+    res.json(parsed);
   } catch (e) {
     console.error("AI Error:", e.message);
     const language = req.body.language || "English";

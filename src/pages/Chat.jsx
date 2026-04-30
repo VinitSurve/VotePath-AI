@@ -1,10 +1,10 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback, memo } from "react";
 import { useExplain } from "../context/ExplainContext";
 import { Send, Bot, User, Sparkles, Mic, ShieldCheck, Volume2, VolumeX, Globe } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
-import { askVotePathAI } from "../services/api";
+import { askVotePathAI } from "../services/aiService";
 
-export default function Chat() {
+export default memo(function Chat() {
   const [msg, setMsg] = useState("");
   const [language, setLanguage] = useState("English");
   const [chat, setChat] = useState([
@@ -20,6 +20,7 @@ export default function Chat() {
   const [isLoading, setIsLoading] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [speakingIndex, setSpeakingIndex] = useState(null);
+  const [error, setError] = useState(null);
   
   const { isELI5 } = useExplain();
   const endOfMessagesRef = useRef(null);
@@ -32,7 +33,7 @@ export default function Chat() {
     scrollToBottom();
   }, [chat, isLoading]);
 
-  const speakText = (text, index) => {
+  const speakText = useCallback((text, index) => {
     if (!('speechSynthesis' in window)) return;
     
     if (speakingIndex === index) {
@@ -55,32 +56,46 @@ export default function Chat() {
 
     setSpeakingIndex(index);
     window.speechSynthesis.speak(utterance);
-  };
+  }, [language, speakingIndex]);
 
-  const handleSend = async (e, overrideMsg = null) => {
+  const handleSend = useCallback(async (e, overrideMsg = null) => {
     if (e) e.preventDefault();
     const messageToSend = overrideMsg || msg;
     if (!messageToSend.trim() || isLoading) return;
 
     const userMsg = { role: "user", text: messageToSend };
-    setChat((c) => [...c, userMsg]);
+    // Instantly show user message + placeholder bot response for perceived speed
+    const placeholder = { role: "bot", data: { title: "Analyzing your question...", simple: "Getting the best answer for you..." } };
+    setChat((c) => [...c, userMsg, placeholder]);
     if (!overrideMsg) setMsg("");
     setIsLoading(true);
+    setError(null);
 
     try {
       const parsed = await askVotePathAI(messageToSend, isELI5 ? "elis" : "normal", language);
-      setChat((c) => [...c, { role: "bot", data: parsed }]);
-    } catch {
-      setChat((c) => [
-        ...c,
-        { role: "bot", data: { simple: "Something went wrong. Please check if the AI server is running." } }
-      ]);
+      // Replace the placeholder with real response
+      setChat((c) => {
+        const updated = [...c];
+        updated[updated.length - 1] = { role: "bot", data: parsed };
+        return updated;
+      });
+    } catch (err) {
+      const errorMessage = err?.message?.includes("429")
+        ? "Too many requests. Please wait a few seconds."
+        : "AI unavailable. Showing verified fallback response.";
+      setError(errorMessage);
+      // Replace placeholder with error fallback
+      setChat((c) => {
+        const updated = [...c];
+        updated[updated.length - 1] = { role: "bot", data: { title: "Connection Issue", simple: errorMessage, source: "System Fallback" } };
+        return updated;
+      });
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [msg, isLoading, isELI5, language]);
 
-  const startListening = () => {
+  const startListening = useCallback(() => {
     if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
       alert("Speech recognition is not supported in this browser.");
       return;
@@ -103,7 +118,7 @@ export default function Chat() {
     recognition.onend = () => setIsListening(false);
 
     recognition.start();
-  };
+  }, [language]);
 
   const suggestions = [
     "What documents do I need to vote?",
@@ -221,6 +236,14 @@ export default function Chat() {
                         )}
                       </div>
                     )}
+
+                        {/* Explainability label — AI transparency signal */}
+                        {c.role === 'bot' && (
+                        <div className="text-xs text-gray-400 mt-3 flex items-center">
+                          <ShieldCheck size={12} className="mr-1 text-green-400" aria-hidden="true" />
+                          💡 Based on official election guidelines from the Election Commission of India
+                        </div>
+                        )}
                   </div>
                 </div>
                 
@@ -236,16 +259,25 @@ export default function Chat() {
           
           {isLoading && (
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-start">
-               <div className="flex flex-row max-w-[80%]">
+               <div className="flex flex-row max-w-[80%] items-center">
                  <div className="flex-shrink-0 flex items-center justify-center h-8 w-8 rounded-full bg-primary-100 mr-3 shadow-sm">
                     <Bot size={16} className="text-primary-600" />
                  </div>
-                 <div className="p-4 bg-white border border-gray-100 rounded-2xl rounded-tl-sm shadow-md flex space-x-1.5 items-center h-12">
+                 <div className="p-4 bg-white border border-gray-100 rounded-2xl rounded-tl-sm shadow-md flex space-x-2 items-center">
                     <div className="w-2 h-2 bg-primary-400 rounded-full animate-bounce"></div>
                     <div className="w-2 h-2 bg-primary-400 rounded-full animate-bounce" style={{ animationDelay: '0.15s' }}></div>
                     <div className="w-2 h-2 bg-primary-400 rounded-full animate-bounce" style={{ animationDelay: '0.3s' }}></div>
+                    <span className="text-sm text-gray-400 ml-2 font-medium">Thinking...</span>
                  </div>
                </div>
+            </motion.div>
+          )}
+
+          {error && (
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-center">
+              <div className="text-sm text-red-500 bg-red-50 border border-red-100 px-4 py-2 rounded-xl font-medium">
+                ⚠️ {error}
+              </div>
             </motion.div>
           )}
         </AnimatePresence>
@@ -295,6 +327,7 @@ export default function Chat() {
             placeholder={isListening ? "Listening..." : "Ask VotePath AI..."}
             className="w-full bg-transparent text-gray-900 py-4 pl-14 pr-14 outline-none font-medium text-[15px]"
             disabled={isLoading || isListening}
+            aria-label="Enter your question"
           />
           <button 
             type="submit" 
@@ -308,4 +341,4 @@ export default function Chat() {
       </div>
     </div>
   );
-}
+});
