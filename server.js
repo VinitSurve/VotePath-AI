@@ -79,6 +79,7 @@ Rules:
 - If about elections → return: {"title":"Topic","steps":[{"title":"Step","desc":"Description"}],"simple":"Short summary","tips":["Tip"],"source":"Election Commission of India"}
 - Keep keys in English. Translate ALL values to ${language}.
 - Keep responses under 120 words.
+- Vary phrasing slightly; avoid repeating the same sentence structure.
 
 User: "${prompt}"`;
 

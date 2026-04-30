@@ -65,7 +65,7 @@ export default memo(function Chat() {
 
     const userMsg = { role: "user", text: messageToSend };
     // Instantly show user message + placeholder bot response for perceived speed
-    const placeholder = { role: "bot", data: { title: "Analyzing your question...", simple: "Getting the best answer for you..." } };
+    const placeholder = { role: "bot", data: { title: "Analyzing...", simple: "Let me break this down for you..." } };
     setChat((c) => [...c, userMsg, placeholder]);
     if (!overrideMsg) setMsg("");
     setIsLoading(true);
@@ -127,7 +127,7 @@ export default memo(function Chat() {
   ];
 
   return (
-    <div className="max-w-3xl mx-auto h-[85vh] flex flex-col bg-white/80 backdrop-blur-xl rounded-2xl shadow-xl border border-white/50 overflow-hidden relative">
+    <div className="max-w-3xl mx-auto h-[85vh] flex flex-col bg-gradient-to-br from-indigo-50 via-white to-blue-50 backdrop-blur-xl rounded-2xl shadow-xl border border-white/50 overflow-hidden relative">
       {/* Header */}
       <div className="bg-white/50 p-4 border-b border-gray-100 flex items-center justify-between backdrop-blur-md sticky top-0 z-10">
         <div className="flex items-center space-x-3">
