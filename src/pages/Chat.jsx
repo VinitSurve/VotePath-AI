@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { useExplain } from "../context/ExplainContext";
 import { Send, Bot, User, Sparkles, Mic, ShieldCheck, Volume2, VolumeX, Globe } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+import { askVotePathAI } from "../services/api";
 
 export default function Chat() {
   const [msg, setMsg] = useState("");
@@ -67,21 +68,7 @@ export default function Chat() {
     setIsLoading(true);
 
     try {
-      const res = await fetch("/api/ask", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: messageToSend, mode: isELI5 ? "elis" : "normal", language })
-      });
-
-      const data = await res.json();
-      let parsed;
-
-      try {
-        parsed = JSON.parse(data.raw);
-      } catch {
-        parsed = data.fallback || { simple: "Sorry, I couldn't understand the format." };
-      }
-
+      const parsed = await askVotePathAI(messageToSend, isELI5 ? "elis" : "normal", language);
       setChat((c) => [...c, { role: "bot", data: parsed }]);
     } catch {
       setChat((c) => [
@@ -140,11 +127,12 @@ export default function Chat() {
 
         {/* Language Selector */}
         <div className="flex items-center space-x-2 bg-white px-3 py-1.5 rounded-xl border border-gray-200 shadow-sm">
-          <Globe size={16} className="text-gray-400" />
+          <Globe size={16} className="text-gray-400" aria-hidden="true" />
           <select 
             value={language} 
             onChange={(e) => setLanguage(e.target.value)}
             className="bg-transparent text-sm font-bold text-gray-700 outline-none cursor-pointer"
+            aria-label="Select Language"
           >
             <option value="English">English</option>
             <option value="Hindi">हिंदी (Hindi)</option>
@@ -185,8 +173,9 @@ export default function Chat() {
                         onClick={() => speakText(textToSpeak, i)}
                         className={`absolute -right-10 top-2 p-2 rounded-full transition-all ${speakingIndex === i ? 'bg-accent-100 text-accent-600 animate-pulse' : 'bg-gray-50 text-gray-400 hover:text-primary-600 opacity-0 group-hover:opacity-100'}`}
                         title="Read Aloud"
+                        aria-label={speakingIndex === i ? "Stop reading" : "Read aloud"}
                       >
-                        {speakingIndex === i ? <VolumeX size={16} /> : <Volume2 size={16} />}
+                        {speakingIndex === i ? <VolumeX size={16} aria-hidden="true" /> : <Volume2 size={16} aria-hidden="true" />}
                       </button>
                     )}
 
@@ -295,8 +284,9 @@ export default function Chat() {
             onClick={startListening}
             className={`absolute left-2 p-2 rounded-xl transition-colors ${isListening ? 'text-red-500 bg-red-100 animate-pulse' : 'text-gray-400 hover:text-primary-600 hover:bg-white'}`}
             title="Use Voice Input"
+            aria-label={isListening ? "Stop listening" : "Start voice input"}
           >
-            <Mic size={22} />
+            <Mic size={22} aria-hidden="true" />
           </button>
           <input
             type="text"
@@ -310,8 +300,9 @@ export default function Chat() {
             type="submit" 
             disabled={!msg.trim() || isLoading}
             className="absolute right-2 p-2.5 bg-primary-600 text-white hover:bg-primary-700 rounded-xl disabled:opacity-50 transition-all shadow-md active:scale-95 my-1"
+            aria-label="Send message"
           >
-            <Send size={18} />
+            <Send size={18} aria-hidden="true" />
           </button>
         </form>
       </div>
