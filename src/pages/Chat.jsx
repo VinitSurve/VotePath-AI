@@ -23,6 +23,8 @@ export default memo(function Chat() {
   const [isListening, setIsListening] = useState(false);
   const [speakingIndex, setSpeakingIndex] = useState(null);
   const [error, setError] = useState(null);
+  const [retryCountdown, setRetryCountdown] = useState(0);
+  const [isServerReachable, setIsServerReachable] = useState(true);
   
   const { isELI5 } = useExplain();
   const endOfMessagesRef = useRef(null);
@@ -44,6 +46,38 @@ export default memo(function Chat() {
     return () => {
       window.removeEventListener('online', onOnline);
       window.removeEventListener('offline', onOffline);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (retryCountdown <= 0) return;
+    const timer = setTimeout(() => setRetryCountdown(c => c - 1), 1000);
+    return () => clearTimeout(timer);
+  }, [retryCountdown]);
+
+  useEffect(() => {
+    const checkConnectivity = async () => {
+      try {
+        const res = await fetch("/health", {
+          method: "HEAD",
+          signal: AbortSignal.timeout(3000)
+        });
+
+        setIsServerReachable(res.ok || res.status < 500);
+      } catch {
+        setIsServerReachable(false);
+      }
+    };
+
+    const interval = setInterval(checkConnectivity, 30000);
+
+    window.addEventListener("online", checkConnectivity);
+    window.addEventListener("offline", () => setIsServerReachable(false));
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("online", checkConnectivity);
+      window.removeEventListener("offline", () => setIsServerReachable(false));
     };
   }, []);
 
@@ -70,6 +104,12 @@ export default memo(function Chat() {
     window.speechSynthesis.speak(utterance);
   }, [language, speakingIndex]);
 
+  const handleRetry = useCallback(async () => {
+    setError(null);
+    setRetryCountdown(0);
+    await handleSend(null, msg);
+  }, [msg]);
+
   const handleSend = useCallback(async (e, overrideMsg = null) => {
     if (e) e.preventDefault();
     const messageToSend = overrideMsg || msg;
@@ -89,37 +129,78 @@ export default memo(function Chat() {
     if (!overrideMsg) setMsg("");
     setIsLoading(true);
     setError(null);
+    setRetryCountdown(0);
     const start = Date.now();
     // include last message content as simple one-step context
     const lastMessage = (chat[chat.length - 1] && chat[chat.length - 1].role === 'user') ? chat[chat.length - 1].text : (chat[chat.length - 1] && chat[chat.length - 1].role === 'bot' ? chat[chat.length - 1].data.simple : "");
-    try {
-      const parsed = await askVotePathAI(messageToSend, isELI5 ? "elis" : "normal", language, lastMessage);
+    
+    const maxRetries = 3;
+    let lastError = null;
 
-      const timeTaken = ((Date.now() - start) / 1000).toFixed(1);
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const parsed = await askVotePathAI(messageToSend, isELI5 ? "elis" : "normal", language, lastMessage);
 
-      // Normalize response shape to avoid UI breakage
-      const safeData = normalizeMessage(parsed, timeTaken);
+        const timeTaken = ((Date.now() - start) / 1000).toFixed(1);
 
-      // Replace the placeholder with real response (safe data)
-      setChat((c) => {
-        const updated = [...c];
-        updated[updated.length - 1] = { role: "bot", data: safeData };
-        return updated;
-      });
-    } catch (err) {
-      const errorMessage = err?.message?.includes("429")
-        ? "Too many requests. Please wait a few seconds."
-        : "AI unavailable. Showing verified fallback response.";
-      setError(errorMessage);
+        // Normalize response shape to avoid UI breakage
+        const safeData = normalizeMessage(parsed, timeTaken);
+
+        // Replace the placeholder with real response (safe data)
+        setChat((c) => {
+          const updated = [...c];
+          updated[updated.length - 1] = { role: "bot", data: safeData };
+          return updated;
+        });
+
+        lastError = null;
+        break;
+      } catch (err) {
+        lastError = err;
+
+        const isRetryable =
+          err.message?.includes("TIMEOUT") ||
+          err.message?.includes("RETRY_AFTER") ||
+          err.message?.includes("503");
+
+        if (isRetryable && attempt < maxRetries) {
+          const backoffMs = Math.pow(2, attempt - 1) * 1000;
+
+          console.log("Retrying", {
+            attempt,
+            backoffMs,
+            error: err.message
+          });
+
+          await new Promise(r => setTimeout(r, backoffMs));
+          continue;
+        }
+
+        break;
+      }
+    }
+
+    if (lastError) {
+      // Set retry countdown for rate limit errors
+      if (lastError.message?.includes("429")) {
+        setRetryCountdown(2);
+        setError("Too many requests. Retry in 2 seconds...");
+      } else if (lastError.message?.includes("TIMEOUT")) {
+        setRetryCountdown(3);
+        setError("Request timed out. Retry in 3 seconds...");
+      } else {
+        setError(lastError.message || "AI unavailable. Showing verified fallback response.");
+      }
+
       // Replace placeholder with error fallback
       setChat((c) => {
         const updated = [...c];
         updated[updated.length - 1] = errorFallbackMessage;
         return updated;
       });
-    } finally {
-      setIsLoading(false);
     }
+
+    setIsLoading(false);
   }, [msg, isLoading, isELI5, language]);
 
   const startListening = useCallback(() => {
@@ -340,14 +421,23 @@ export default memo(function Chat() {
             <motion.div
               initial={{ opacity: 0 }} 
               animate={{ opacity: 1 }} 
-              className="flex justify-center"
+              className="flex justify-center gap-2 items-center"
               role="alert"
               aria-live="polite"
               aria-atomic="true"
             >
               <div className="text-sm text-red-500 bg-red-50 border border-red-100 px-4 py-2 rounded-xl font-medium">
                 ⚠️ {error}
+                {retryCountdown > 0 && ` (${retryCountdown}s)`}
               </div>
+              <button
+                onClick={handleRetry}
+                disabled={retryCountdown > 0 || isLoading}
+                className="px-3 py-1 bg-red-600 text-white rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed hover:bg-red-700 transition-colors"
+                aria-label="Retry request"
+              >
+                Retry
+              </button>
             </motion.div>
           )}
         </AnimatePresence>

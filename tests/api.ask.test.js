@@ -125,4 +125,50 @@ describe("POST /api/ask", () => {
     expect(res.body.data).toHaveProperty("source");
   });
 
+  it("returns cached response on second request", async () => {
+    mockGenerate.mockResolvedValueOnce({
+      response: { text: () => JSON.stringify({ title: 'How to vote', steps: [], simple: 'Go vote', tips: [], source: 'Election Commission of India' }) }
+    });
+
+    const res1 = await request(app).post("/api/ask").send({
+      prompt: "Cache test prompt"
+    });
+
+    expect(res1.status).toBe(200);
+    expect(res1.body.data._meta.cached).toBe(false);
+
+    // Clear rate limit to avoid hitting it on second request
+    clearRequestLog();
+
+    const res2 = await request(app).post("/api/ask").send({
+      prompt: "Cache test prompt"
+    });
+
+    expect(res2.status).toBe(200);
+    expect(res2.body.data._meta.cached).toBe(true);
+  });
+
+  it("returns rate limit headers", async () => {
+    mockGenerate.mockResolvedValueOnce({
+      response: { text: () => JSON.stringify({ title: 'T', steps: [], simple: 'S', tips: [], source: 'Election Commission of India' }) }
+    });
+
+    await request(app).post("/api/ask").send({ prompt: "vote" });
+    
+    const res = await request(app).post("/api/ask").send({ prompt: "vote" });
+
+    expect(res.status).toBe(429);
+    expect(res.headers["retry-after"]).toBeDefined();
+    expect(res.body.data._meta.retryAfterMs).toBe(2000);
+  });
+
+  it("rejects long prompt", async () => {
+    const res = await request(app).post("/api/ask").send({
+      prompt: "a".repeat(600)
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.errorType).toBe("INVALID_INPUT");
+  });
+
 });

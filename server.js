@@ -88,7 +88,15 @@ app.post("/api/ask", async (req, res) => {
           res.setHeader("Retry-After", "2");
           res.setHeader("X-RateLimit-Limit", "1");
           res.setHeader("X-RateLimit-Remaining", "0");
-          const errorData = { ...fallbacks.RATE_LIMIT, requestId };
+          const errorData = {
+            ...fallbacks.RATE_LIMIT,
+            requestId,
+            _meta: {
+              errorType: "RATE_LIMIT",
+              retryable: true,
+              retryAfterMs: 2000
+            }
+          };
           return res.status(429).json({ success: false, data: errorData, errorType: "RATE_LIMIT", statusCode: 429, requestId });
         }
       }
@@ -103,13 +111,29 @@ app.post("/api/ask", async (req, res) => {
     if (!prompt || typeof prompt !== 'string') {
       const requestIdBad = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
       console.warn("Invalid input", { requestId: requestIdBad });
-      const errorData = { ...fallbacks.INVALID_INPUT, requestId: requestIdBad };
+      const errorData = {
+        ...fallbacks.INVALID_INPUT,
+        requestId: requestIdBad,
+        _meta: {
+          errorType: "INVALID_INPUT",
+          retryable: false,
+          retryAfterMs: 0
+        }
+      };
       return res.status(400).json({ success: false, data: errorData, errorType: "INVALID_INPUT", statusCode: 400, requestId: requestIdBad });
     }
     if (prompt.length > 500) {
       const requestIdLong = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
       console.warn("Prompt too long", { requestId: requestIdLong });
-      const errorData = { ...fallbacks.INVALID_INPUT, requestId: requestIdLong };
+      const errorData = {
+        ...fallbacks.INVALID_INPUT,
+        requestId: requestIdLong,
+        _meta: {
+          errorType: "INVALID_INPUT",
+          retryable: false,
+          retryAfterMs: 0
+        }
+      };
       return res.status(400).json({ success: false, data: errorData, errorType: "INVALID_INPUT", statusCode: 400, requestId: requestIdLong });
     }
 
@@ -147,6 +171,10 @@ User: "${prompt}"
         console.log("Cache hit", { requestId, cacheKey });
         res.setHeader("X-Response-Time", String(Date.now() - now));
         const cacheData = { ...cached.data, requestId, isCached: true };
+        // Update _meta to show this was a cache hit
+        if (cacheData._meta) {
+          cacheData._meta.cached = true;
+        }
         return res.json({ success: true, data: cacheData, errorType: null, statusCode: 200, requestId });
       }
       cache.delete(cacheKey);
@@ -209,17 +237,6 @@ User: "${prompt}"
     parsed.lastUpdated = new Date().toISOString();
     parsed.requestId = requestId;
 
-    // store in simple cache for repeated prompts with time
-    try {
-      cache.set(cacheKey, { data: parsed, time: Date.now() });
-      if (cache.size > 50) {
-      const oldestKey = cache.keys().next().value;
-      if (oldestKey) cache.delete(oldestKey);
-    }
-    } catch (cErr) {
-      console.warn("Cache set failed", cErr.message);
-    }
-
     res.setHeader("X-Response-Time", String(Date.now() - now));
     const responseData = {
       ...parsed,
@@ -228,9 +245,22 @@ User: "${prompt}"
         temperature: 0.3,
         topP: 0.8,
         responseTime: Date.now() - now,
-        cached: false
+        cached: false,
+        timeout: 8000,
+        retryable: false
       }
     };
+
+    // store in simple cache for repeated prompts with time
+    try {
+      cache.set(cacheKey, { data: responseData, time: Date.now() });
+      if (cache.size > 50) {
+      const oldestKey = cache.keys().next().value;
+      if (oldestKey) cache.delete(oldestKey);
+    }
+    } catch (cErr) {
+      console.warn("Cache set failed", cErr.message);
+    }
     console.log("AI response", {
       requestId,
       time: Date.now() - now,
@@ -242,7 +272,15 @@ User: "${prompt}"
     const language = req.body.language || "English";
     const requestIdErr = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
     console.error("ErrorType:", "AI_ERROR", "Request:", requestIdErr);
-    const errorData = { ...fallbacks.AI_ERROR, requestId: requestIdErr };
+    const errorData = {
+      ...fallbacks.AI_ERROR,
+      requestId: requestIdErr,
+      _meta: {
+        errorType: "AI_ERROR",
+        retryable: true,
+        retryAfterMs: 1000
+      }
+    };
     res.status(500).json({ success: false, data: errorData, errorType: "AI_ERROR", statusCode: 500, requestId: requestIdErr });
   }
 });
