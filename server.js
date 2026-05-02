@@ -118,13 +118,25 @@ app.post("/api/ask", async (req, res) => {
       generationConfig: {
         responseMimeType: "application/json",
         temperature: 0.3,
+        topP: 0.8,
         maxOutputTokens: 512,
       }
     });
 
     // Build prompt with optional previous context for a single-step memory
-    const contextText = context ? `Previous context: ${context}\n` : "";
-    const promptText = `You are VotePath AI, an assistant for the Indian election process.\n${contextText}Respond ONLY in ${language}. Return STRICT JSON.${mode === "elis" ? " Simplify for a 10-year-old." : ""}\n\nRules:\n- If NOT about Indian elections → return: {"title":"Off-topic Question","simple":"I can only answer questions about Indian elections and voting.","source":"VotePath AI"}\n- If about elections → return: {"title":"Topic","steps":[{"title":"Step","desc":"Description"}],"simple":"Short summary","tips":["Tip"],"source":"Election Commission of India"}\n- Keep keys in English. Translate ALL values to ${language}.\n- Keep responses under 120 words.\n- Vary phrasing slightly; avoid repeating the same sentence structure.\n\nUser: "${prompt}"`;
+    const promptText = `
+You are VotePath AI, assistant for Indian elections.${mode === "elis" ? " Explain simply." : ""}
+
+Instructions:
+- Respond ONLY in ${language}.
+- Return JSON: {title, steps[], simple, tips[], source}
+- Off-topic → title="Off-topic Question", simple="I answer Indian election questions only."
+- Elections → steps=[{title, desc}], source="Election Commission of India"
+- Translate values to ${language}, keys stay English
+- Max 120 words${context ? `\nContext: ${context}` : ""}
+
+User: "${prompt}"
+`;
 
     // Simple response cache key with TTL
     const cacheKey = `${language}::${prompt.trim().toLowerCase()}`;
@@ -152,11 +164,38 @@ app.post("/api/ask", async (req, res) => {
 
       try {
         parsed = JSON.parse(text);
+
+        // Off-topic validation
+        if (parsed.title === "Off-topic Question") {
+          console.log("Off-topic detected", { requestId });
+        }
+
+        // Basic language validation
+        const englishWords = parsed.simple?.match(/\b(the|is|are|and)\b/gi)?.length || 0;
+        if (language !== "English" && englishWords > 5) {
+          console.warn("Language mismatch", { requestId, language });
+        }
       } catch (parseErr) {
+        console.error("JSON parse error", {
+          requestId,
+          text: text.slice(0, 100)
+        });
         parsed = fallbacks.DEFAULT;
       }
     } catch (genErr) {
       clearTimeout(timeout);
+
+      let errorType = "GENERATION_ERROR";
+      if (genErr.name === "AbortError") errorType = "TIMEOUT";
+      if (genErr.message?.includes("429")) errorType = "RATE_LIMIT";
+      if (genErr.message?.toLowerCase().includes("safety")) errorType = "SAFETY_FILTER";
+
+      console.error("Model error", {
+        requestId,
+        errorType,
+        message: genErr.message
+      });
+
       parsed = fallbacks.DEFAULT;
     }
 
@@ -182,7 +221,21 @@ app.post("/api/ask", async (req, res) => {
     }
 
     res.setHeader("X-Response-Time", String(Date.now() - now));
-    const responseData = { ...parsed, requestId };
+    const responseData = {
+      ...parsed,
+      requestId,
+      _meta: {
+        temperature: 0.3,
+        topP: 0.8,
+        responseTime: Date.now() - now,
+        cached: false
+      }
+    };
+    console.log("AI response", {
+      requestId,
+      time: Date.now() - now,
+      title: parsed?.title
+    });
     res.json({ success: true, data: responseData, errorType: null, statusCode: 200, requestId });
   } catch (e) {
     console.error("AI Error:", e.message);
