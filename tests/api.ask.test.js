@@ -99,4 +99,30 @@ describe("POST /api/ask", () => {
     expect(res.body).toHaveProperty("requestId");
   });
 
+  it("always returns valid response contract shape", async () => {
+    mockGenerate.mockResolvedValueOnce({
+      response: { text: () => JSON.stringify({ title: 'How to vote', steps: [], simple: 'Go vote', tips: [], source: 'Election Commission of India' }) }
+    });
+
+    const res = await request(app).post("/api/ask").send({
+      prompt: "How to vote"
+    });
+
+    // Validate response envelope
+    expect(res.body).toHaveProperty("success");
+    expect(res.body).toHaveProperty("data");
+    expect(res.body).toHaveProperty("errorType");
+    expect(res.body).toHaveProperty("statusCode");
+    expect(res.body).toHaveProperty("requestId");
+
+    // Validate data shape
+    expect(res.body.data).toHaveProperty("title");
+    expect(res.body.data).toHaveProperty("steps");
+    expect(Array.isArray(res.body.data.steps)).toBe(true);
+    expect(res.body.data).toHaveProperty("simple");
+    expect(res.body.data).toHaveProperty("tips");
+    expect(Array.isArray(res.body.data.tips)).toBe(true);
+    expect(res.body.data).toHaveProperty("source");
+  });
+
 });

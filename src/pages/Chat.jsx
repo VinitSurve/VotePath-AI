@@ -3,6 +3,8 @@ import { useExplain } from "../context/ExplainContext";
 import { Send, Bot, User, Sparkles, Mic, ShieldCheck, Volume2, VolumeX, Globe } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { askVotePathAI } from "../services/aiService";
+import { languageCodeMap } from "../utils/languageMap";
+import { normalizeMessage, placeholderMessage, errorFallbackMessage } from "../utils/normalizeMessage";
 
 export default memo(function Chat() {
   const [msg, setMsg] = useState("");
@@ -57,11 +59,9 @@ export default memo(function Chat() {
     window.speechSynthesis.cancel(); // Stop any current speech
     const utterance = new SpeechSynthesisUtterance(text);
     
-    // Attempt to set accent based on language
-    if (language === 'Hindi') utterance.lang = 'hi-IN';
-    else if (language === 'Marathi') utterance.lang = 'mr-IN';
-    else if (language === 'Tamil') utterance.lang = 'ta-IN';
-    else utterance.lang = 'en-IN';
+    // Set language code using language map
+    const langCode = languageCodeMap[language] || 'en-IN';
+    utterance.lang = langCode;
 
     utterance.onend = () => setSpeakingIndex(null);
     utterance.onerror = () => setSpeakingIndex(null);
@@ -85,8 +85,7 @@ export default memo(function Chat() {
 
     const userMsg = { role: "user", text: messageToSend };
     // Instantly show user message + placeholder bot response for perceived speed
-    const placeholder = { role: "bot", data: { title: "Analyzing...", simple: "Let me break this down for you..." } };
-    setChat((c) => [...c, userMsg, placeholder]);
+    setChat((c) => [...c, userMsg, placeholderMessage]);
     if (!overrideMsg) setMsg("");
     setIsLoading(true);
     setError(null);
@@ -99,15 +98,7 @@ export default memo(function Chat() {
       const timeTaken = ((Date.now() - start) / 1000).toFixed(1);
 
       // Normalize response shape to avoid UI breakage
-      const safeData = {
-        title: parsed.title || "Response",
-        steps: parsed.steps || [],
-        simple: parsed.simple || "",
-        tips: parsed.tips || [],
-        source: parsed.source || "Election Commission of India",
-        lastUpdated: parsed.lastUpdated || new Date().toISOString(),
-        _meta: { responseTime: timeTaken }
-      };
+      const safeData = normalizeMessage(parsed, timeTaken);
 
       // Replace the placeholder with real response (safe data)
       setChat((c) => {
@@ -123,7 +114,7 @@ export default memo(function Chat() {
       // Replace placeholder with error fallback
       setChat((c) => {
         const updated = [...c];
-        updated[updated.length - 1] = { role: "bot", data: { title: "Connection Issue", simple: errorMessage, source: "System Fallback", lastUpdated: new Date().toISOString() } };
+        updated[updated.length - 1] = errorFallbackMessage;
         return updated;
       });
     } finally {
@@ -143,10 +134,9 @@ export default memo(function Chat() {
     recognition.continuous = false;
     recognition.interimResults = false;
     
-    if (language === 'Hindi') recognition.lang = 'hi-IN';
-    else if (language === 'Marathi') recognition.lang = 'mr-IN';
-    else if (language === 'Tamil') recognition.lang = 'ta-IN';
-    else recognition.lang = 'en-IN';
+    // Set language code using language map
+    const langCode = languageCodeMap[language] || 'en-IN';
+    recognition.lang = langCode;
 
     recognition.onstart = () => setIsListening(true);
     recognition.onresult = (event) => setMsg(event.results[0][0].transcript);
@@ -347,7 +337,14 @@ export default memo(function Chat() {
           )}
 
           {error && chat.length > 0 && (
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-center">
+            <motion.div
+              initial={{ opacity: 0 }} 
+              animate={{ opacity: 1 }} 
+              className="flex justify-center"
+              role="alert"
+              aria-live="polite"
+              aria-atomic="true"
+            >
               <div className="text-sm text-red-500 bg-red-50 border border-red-100 px-4 py-2 rounded-xl font-medium">
                 ⚠️ {error}
               </div>

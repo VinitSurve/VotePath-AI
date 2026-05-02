@@ -31,16 +31,39 @@ app.use(express.static(path.join(__dirname, "dist")));
 const apiKey = process.env.GEMINI_API_KEY;
 const genAI = new GoogleGenerativeAI(apiKey || "DUMMY_KEY");
 
-const defaultResponse = {
-  title: "How to vote",
-  steps: [
-    { title: "Register", desc: "Apply for voter ID online or offline." },
-    { title: "Check list", desc: "Verify your name on the electoral roll." },
-    { title: "Vote", desc: "Go to polling booth with your EPIC (Voter ID)." }
-  ],
-  simple: "You sign up, check your name on the list, and go to the booth to press the button!",
-  tips: ["Carry your Voter ID", "Check your polling booth online", "Don't carry mobile phones inside"],
-  source: "Election Commission of India"
+const fallbacks = {
+  DEFAULT: {
+    title: "How to vote",
+    steps: [
+      { title: "Register", desc: "Apply for voter ID online or offline." },
+      { title: "Check list", desc: "Verify your name on the electoral roll." },
+      { title: "Vote", desc: "Go to polling booth with your EPIC (Voter ID)." }
+    ],
+    simple: "You sign up, check your name on the list, and go to the booth to press the button!",
+    tips: ["Carry your Voter ID", "Check your polling booth online", "Don't carry mobile phones inside"],
+    source: "Election Commission of India"
+  },
+  INVALID_INPUT: {
+    title: "Invalid Request",
+    simple: "Your question is too long or empty. Please try again.",
+    source: "Validation Error",
+    steps: [],
+    tips: []
+  },
+  RATE_LIMIT: {
+    title: "Too Many Requests",
+    simple: "You're asking too fast. Please wait 2 seconds and try again.",
+    source: "Rate Limit",
+    steps: [],
+    tips: []
+  },
+  AI_ERROR: {
+    title: "Temporary Service Issue",
+    simple: "Our AI is unavailable. Please try again in a moment.",
+    source: "Service Fallback",
+    steps: [],
+    tips: []
+  }
 };
 
 const requestLog = new Map();
@@ -65,7 +88,8 @@ app.post("/api/ask", async (req, res) => {
           res.setHeader("Retry-After", "2");
           res.setHeader("X-RateLimit-Limit", "1");
           res.setHeader("X-RateLimit-Remaining", "0");
-          return res.status(429).json({ success: false, data: defaultResponse, errorType: "RATE_LIMIT", requestId });
+          const errorData = { ...fallbacks.RATE_LIMIT, requestId };
+          return res.status(429).json({ success: false, data: errorData, errorType: "RATE_LIMIT", statusCode: 429, requestId });
         }
       }
     }
@@ -79,12 +103,14 @@ app.post("/api/ask", async (req, res) => {
     if (!prompt || typeof prompt !== 'string') {
       const requestIdBad = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
       console.warn("Invalid input", { requestId: requestIdBad });
-      return res.status(400).json({ success: false, data: defaultResponse, errorType: "INVALID_INPUT", requestId: requestIdBad });
+      const errorData = { ...fallbacks.INVALID_INPUT, requestId: requestIdBad };
+      return res.status(400).json({ success: false, data: errorData, errorType: "INVALID_INPUT", statusCode: 400, requestId: requestIdBad });
     }
     if (prompt.length > 500) {
       const requestIdLong = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
       console.warn("Prompt too long", { requestId: requestIdLong });
-      return res.status(400).json({ success: false, data: defaultResponse, errorType: "INVALID_INPUT", requestId: requestIdLong });
+      const errorData = { ...fallbacks.INVALID_INPUT, requestId: requestIdLong };
+      return res.status(400).json({ success: false, data: errorData, errorType: "INVALID_INPUT", statusCode: 400, requestId: requestIdLong });
     }
 
     const model = genAI.getGenerativeModel({
@@ -108,7 +134,8 @@ app.post("/api/ask", async (req, res) => {
       if (Date.now() - cached.time < TTL) {
         console.log("Cache hit", { requestId, cacheKey });
         res.setHeader("X-Response-Time", String(Date.now() - now));
-        return res.json({ success: true, data: cached.data, errorType: null, requestId });
+        const cacheData = { ...cached.data, requestId, isCached: true };
+        return res.json({ success: true, data: cacheData, errorType: null, statusCode: 200, requestId });
       }
       cache.delete(cacheKey);
     }
@@ -126,20 +153,20 @@ app.post("/api/ask", async (req, res) => {
       try {
         parsed = JSON.parse(text);
       } catch (parseErr) {
-        parsed = defaultResponse;
+        parsed = fallbacks.DEFAULT;
       }
     } catch (genErr) {
       clearTimeout(timeout);
-      parsed = defaultResponse;
+      parsed = fallbacks.DEFAULT;
     }
 
     // Ensure minimal shape and add lastUpdated metadata + request id
-    parsed = parsed || defaultResponse;
-    parsed.title = parsed.title || defaultResponse.title;
-    parsed.steps = parsed.steps || defaultResponse.steps;
-    parsed.simple = parsed.simple || defaultResponse.simple;
-    parsed.tips = parsed.tips || defaultResponse.tips;
-    parsed.source = parsed.source || defaultResponse.source;
+    parsed = parsed || fallbacks.DEFAULT;
+    parsed.title = parsed.title || fallbacks.DEFAULT.title;
+    parsed.steps = parsed.steps || fallbacks.DEFAULT.steps;
+    parsed.simple = parsed.simple || fallbacks.DEFAULT.simple;
+    parsed.tips = parsed.tips || fallbacks.DEFAULT.tips;
+    parsed.source = parsed.source || fallbacks.DEFAULT.source;
     parsed.lastUpdated = new Date().toISOString();
     parsed.requestId = requestId;
 
@@ -155,13 +182,15 @@ app.post("/api/ask", async (req, res) => {
     }
 
     res.setHeader("X-Response-Time", String(Date.now() - now));
-    res.json({ success: true, data: parsed, errorType: null, requestId });
+    const responseData = { ...parsed, requestId };
+    res.json({ success: true, data: responseData, errorType: null, statusCode: 200, requestId });
   } catch (e) {
     console.error("AI Error:", e.message);
     const language = req.body.language || "English";
     const requestIdErr = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
     console.error("ErrorType:", "AI_ERROR", "Request:", requestIdErr);
-    res.status(500).json({ success: false, data: defaultResponse, errorType: "AI_ERROR", requestId: requestIdErr });
+    const errorData = { ...fallbacks.AI_ERROR, requestId: requestIdErr };
+    res.status(500).json({ success: false, data: errorData, errorType: "AI_ERROR", statusCode: 500, requestId: requestIdErr });
   }
 });
 
