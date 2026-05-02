@@ -62,6 +62,9 @@ app.post("/api/ask", async (req, res) => {
         const lastRequest = requestLog.get(userIP);
         if (now - lastRequest < 2000) {
           console.warn("Rate limit hit", { requestId, userIP });
+          res.setHeader("Retry-After", "2");
+          res.setHeader("X-RateLimit-Limit", "1");
+          res.setHeader("X-RateLimit-Remaining", "0");
           return res.status(429).json({ success: false, data: defaultResponse, errorType: "RATE_LIMIT", requestId });
         }
       }
@@ -104,6 +107,7 @@ app.post("/api/ask", async (req, res) => {
       const TTL = 60_000; // 1 minute
       if (Date.now() - cached.time < TTL) {
         console.log("Cache hit", { requestId, cacheKey });
+        res.setHeader("X-Response-Time", String(Date.now() - now));
         return res.json({ success: true, data: cached.data, errorType: null, requestId });
       }
       cache.delete(cacheKey);
@@ -142,11 +146,15 @@ app.post("/api/ask", async (req, res) => {
     // store in simple cache for repeated prompts with time
     try {
       cache.set(cacheKey, { data: parsed, time: Date.now() });
-      if (cache.size > 50) cache.clear();
+      if (cache.size > 50) {
+      const oldestKey = cache.keys().next().value;
+      if (oldestKey) cache.delete(oldestKey);
+    }
     } catch (cErr) {
       console.warn("Cache set failed", cErr.message);
     }
 
+    res.setHeader("X-Response-Time", String(Date.now() - now));
     res.json({ success: true, data: parsed, errorType: null, requestId });
   } catch (e) {
     console.error("AI Error:", e.message);
