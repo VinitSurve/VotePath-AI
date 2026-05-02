@@ -25,6 +25,8 @@ export default memo(function Chat() {
   const [error, setError] = useState(null);
   const [retryCountdown, setRetryCountdown] = useState(0);
   const [isServerReachable, setIsServerReachable] = useState(true);
+    const [showSentFeedback, setShowSentFeedback] = useState(false);
+    const [showOfflineBanner, setShowOfflineBanner] = useState(false);
   
   const { isELI5 } = useExplain();
   const endOfMessagesRef = useRef(null);
@@ -130,6 +132,8 @@ export default memo(function Chat() {
     setIsLoading(true);
     setError(null);
     setRetryCountdown(0);
+      setShowSentFeedback(true);
+      setTimeout(() => setShowSentFeedback(false), 2000);
     const start = Date.now();
     // include last message content as simple one-step context
     const lastMessage = (chat[chat.length - 1] && chat[chat.length - 1].role === 'user') ? chat[chat.length - 1].text : (chat[chat.length - 1] && chat[chat.length - 1].role === 'bot' ? chat[chat.length - 1].data.simple : "");
@@ -270,6 +274,9 @@ export default memo(function Chat() {
       {!isOnline && (
         <div className="w-full text-center text-red-600 bg-red-50 border-t border-red-100 py-2 text-sm">You are offline. Please check your connection.</div>
       )}
+        {isOnline && !isServerReachable && (
+          <div className="w-full text-center text-orange-600 bg-orange-50 border-t border-orange-100 py-2 text-sm">⚠️ Server is unreachable. Your messages may not be sent.</div>
+        )}
       <section aria-label="Chat conversation" className="flex-1 overflow-y-auto p-4 space-y-6 bg-gradient-to-b from-transparent to-gray-50/30">
         <AnimatePresence initial={false}>
           {chat.map((c, i) => {
@@ -503,13 +510,27 @@ export default memo(function Chat() {
           <button 
             type="submit" 
             disabled={!msg.trim() || isLoading}
-            className="absolute right-2 p-2.5 bg-primary-600 text-white hover:bg-primary-700 rounded-xl disabled:opacity-50 transition-all shadow-md active:scale-95 my-1"
+              className="absolute right-2 p-2.5 bg-primary-600 text-white hover:bg-primary-700 rounded-xl disabled:opacity-40 disabled:bg-gray-400 disabled:cursor-not-allowed transition-all shadow-md active:scale-95 my-1"
             aria-label="Send message"
           >
             <Send size={18} aria-hidden="true" />
           </button>
         </form>
       </div>
+      
+        {/* Sent feedback toast */}
+        <AnimatePresence>
+          {showSentFeedback && (
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              className="absolute bottom-24 left-1/2 -translate-x-1/2 bg-green-600 text-white px-4 py-2 rounded-lg text-sm font-medium shadow-lg"
+            >
+              ✓ Message sent
+            </motion.div>
+          )}
+        </AnimatePresence>
     </div>
     </main>
   );

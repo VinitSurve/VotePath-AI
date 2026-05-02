@@ -8,6 +8,17 @@ export default function Eligibility() {
   const [isCitizen, setIsCitizen] = useState(null);
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
+  const [ageError, setAgeError] = useState('');
+
+  const validateAge = (value) => {
+    if (!value) {
+      setAgeError('Age is required');
+    } else if (isNaN(value) || parseInt(value) <= 0 || parseInt(value) > 130) {
+      setAgeError('Please enter a valid age between 1 and 130');
+    } else {
+      setAgeError('');
+    }
+  };
 
   const checkEligibility = (e) => {
     e.preventDefault();
@@ -69,11 +80,21 @@ export default function Eligibility() {
               type="number"
               value={age}
               onChange={(e) => setAge(e.target.value)}
-              className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition-all outline-none"
+                onBlur={() => validateAge(age)}
+                className={`w-full p-3 border rounded-xl focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition-all outline-none ${
+                  ageError ? 'border-red-500 bg-red-50' : 'border-gray-300'
+                }`}
               placeholder="e.g. 18"
               aria-required="true"
-              aria-invalid={error && (!age || isNaN(age)) ? "true" : "false"}
+                aria-invalid={ageError ? "true" : "false"}
+                aria-describedby={ageError ? "age-error" : undefined}
             />
+              {ageError && (
+                <p id="age-error" className="text-red-600 text-sm mt-1 flex items-center">
+                  <AlertCircle size={14} className="mr-1" />
+                  {ageError}
+                </p>
+              )}
           </div>
 
           <div>
@@ -115,7 +136,10 @@ export default function Eligibility() {
             </div>
           )}
 
-          <button type="submit" className="w-full btn-primary py-3 text-lg mt-4">
+          <button 
+              type="submit"
+              className="w-full btn-primary py-3 text-lg mt-4 transition-colors"
+          >
             Check Eligibility
           </button>
         </form>
