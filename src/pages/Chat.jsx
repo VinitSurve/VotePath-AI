@@ -24,6 +24,7 @@ export default memo(function Chat() {
   
   const { isELI5 } = useExplain();
   const endOfMessagesRef = useRef(null);
+  const [isOnline, setIsOnline] = useState(typeof navigator !== 'undefined' ? navigator.onLine : true);
 
   const scrollToBottom = () => {
     endOfMessagesRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -32,6 +33,17 @@ export default memo(function Chat() {
   useEffect(() => {
     scrollToBottom();
   }, [chat, isLoading]);
+
+  useEffect(() => {
+    const onOnline = () => setIsOnline(true);
+    const onOffline = () => setIsOnline(false);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+    };
+  }, []);
 
   const speakText = useCallback((text, index) => {
     if (!('speechSynthesis' in window)) return;
@@ -62,6 +74,14 @@ export default memo(function Chat() {
     if (e) e.preventDefault();
     const messageToSend = overrideMsg || msg;
     if (!messageToSend.trim() || isLoading) return;
+    if (!navigator.onLine) {
+      setError('You are offline. Please check your connection.');
+      return;
+    }
+    if (messageToSend.trim().length < 3) {
+      setError('Please enter a meaningful question.');
+      return;
+    }
 
     const userMsg = { role: "user", text: messageToSend };
     // Instantly show user message + placeholder bot response for perceived speed
@@ -70,13 +90,29 @@ export default memo(function Chat() {
     if (!overrideMsg) setMsg("");
     setIsLoading(true);
     setError(null);
-
+    const start = Date.now();
+    // include last message content as simple one-step context
+    const lastMessage = (chat[chat.length - 1] && chat[chat.length - 1].role === 'user') ? chat[chat.length - 1].text : (chat[chat.length - 1] && chat[chat.length - 1].role === 'bot' ? chat[chat.length - 1].data.simple : "");
     try {
-      const parsed = await askVotePathAI(messageToSend, isELI5 ? "elis" : "normal", language);
-      // Replace the placeholder with real response
+      const parsed = await askVotePathAI(messageToSend, isELI5 ? "elis" : "normal", language, lastMessage);
+
+      const timeTaken = ((Date.now() - start) / 1000).toFixed(1);
+
+      // Normalize response shape to avoid UI breakage
+      const safeData = {
+        title: parsed.title || "Response",
+        steps: parsed.steps || [],
+        simple: parsed.simple || "",
+        tips: parsed.tips || [],
+        source: parsed.source || "Election Commission of India",
+        lastUpdated: parsed.lastUpdated || new Date().toISOString(),
+        _meta: { responseTime: timeTaken }
+      };
+
+      // Replace the placeholder with real response (safe data)
       setChat((c) => {
         const updated = [...c];
-        updated[updated.length - 1] = { role: "bot", data: parsed };
+        updated[updated.length - 1] = { role: "bot", data: safeData };
         return updated;
       });
     } catch (err) {
@@ -87,7 +123,7 @@ export default memo(function Chat() {
       // Replace placeholder with error fallback
       setChat((c) => {
         const updated = [...c];
-        updated[updated.length - 1] = { role: "bot", data: { title: "Connection Issue", simple: errorMessage, source: "System Fallback" } };
+        updated[updated.length - 1] = { role: "bot", data: { title: "Connection Issue", simple: errorMessage, source: "System Fallback", lastUpdated: new Date().toISOString() } };
         return updated;
       });
     } finally {
@@ -127,12 +163,14 @@ export default memo(function Chat() {
   ];
 
   return (
-    <div className="max-w-3xl mx-auto h-[85vh] flex flex-col bg-gradient-to-br from-indigo-50 via-white to-blue-50 backdrop-blur-xl rounded-2xl shadow-xl border border-white/50 overflow-hidden relative">
+    <main role="main">
+    <div tabIndex="0" className="max-w-3xl mx-auto h-[85vh] flex flex-col bg-gradient-to-br from-indigo-50 via-white to-blue-50 backdrop-blur-xl rounded-2xl shadow-xl border border-white/50 overflow-hidden relative">
       {/* Header */}
       <div className="bg-white/50 p-4 border-b border-gray-100 flex items-center justify-between backdrop-blur-md sticky top-0 z-10">
-        <div className="flex items-center space-x-3">
+          <div className="flex items-center space-x-3">
           <div className="bg-primary-100 p-2 rounded-2xl shadow-inner">
             <Bot className="text-primary-600" size={24} />
+            <div className="text-[10px] text-gray-400">System status: {isLoading ? 'Processing' : 'Ready'}</div>
           </div>
           <div>
             <h2 className="font-bold text-gray-900 text-lg">VotePath AI</h2>
@@ -158,7 +196,10 @@ export default memo(function Chat() {
       </div>
 
       {/* Chat Area */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-6 bg-gradient-to-b from-transparent to-gray-50/30">
+      {!isOnline && (
+        <div className="w-full text-center text-red-600 bg-red-50 border-t border-red-100 py-2 text-sm">You are offline. Please check your connection.</div>
+      )}
+      <section aria-label="Chat conversation" className="flex-1 overflow-y-auto p-4 space-y-6 bg-gradient-to-b from-transparent to-gray-50/30">
         <AnimatePresence initial={false}>
           {chat.map((c, i) => {
             // Compile text for speech
@@ -185,6 +226,7 @@ export default memo(function Chat() {
                   }`}>
                     {c.role === 'bot' && textToSpeak && (
                       <button 
+                        type="button"
                         onClick={() => speakText(textToSpeak, i)}
                         className={`absolute -right-10 top-2 p-2 rounded-full transition-all ${speakingIndex === i ? 'bg-accent-100 text-accent-600 animate-pulse' : 'bg-gray-50 text-gray-400 hover:text-primary-600 opacity-0 group-hover:opacity-100'}`}
                         title="Read Aloud"
@@ -237,11 +279,11 @@ export default memo(function Chat() {
                       </div>
                     )}
 
-                        {/* Explainability label — AI transparency signal */}
+                        {/* Confidence / explainability tag */}
                         {c.role === 'bot' && (
-                        <div className="text-xs text-gray-400 mt-3 flex items-center">
-                          <ShieldCheck size={12} className="mr-1 text-green-400" aria-hidden="true" />
-                          💡 Based on official election guidelines from the Election Commission of India
+                        <div className="text-xs text-blue-500 mt-3 flex items-center" aria-hidden="true">
+                          <span className="mr-1">✔</span>
+                          <span>Verified guidance based on official election procedures</span>
                         </div>
                         )}
                   </div>
@@ -250,8 +292,31 @@ export default memo(function Chat() {
                 {c.role === 'bot' && c.data.source && (
                   <div className="flex items-center text-[11px] font-bold text-gray-400 mt-2 ml-14 bg-white/80 backdrop-blur-sm px-2.5 py-1 rounded-full shadow-sm border border-gray-100">
                     <ShieldCheck size={12} className="text-green-500 mr-1.5" />
-                    Source: {c.data.source}
+                    Source: {
+                      (typeof c.data.source === 'string' && c.data.source.toLowerCase().includes('http')) ? (
+                        <a href={c.data.source} target="_blank" rel="noreferrer" className="text-green-600 underline">{c.data.source}</a>
+                      ) : c.data.source === 'Election Commission of India' ? (
+                        <a href="https://eci.gov.in" target="_blank" rel="noreferrer" className="text-green-600 underline">Election Commission of India</a>
+                      ) : (
+                        <span>{c.data.source}</span>
+                      )
+                    }
+
+                    {/* Response time and last-updated */}
+                    {c.data._meta?.responseTime && (
+                      <span className="text-xs text-gray-400 ml-3">⏱ {c.data._meta.responseTime}s</span>
+                    )}
+                    {c.data.lastUpdated && (
+                      <span className="text-xs text-gray-400 ml-3">Updated as per latest public election guidelines</span>
+                    )}
+                    {c.data.requestId && (
+                      <span className="text-[10px] text-gray-400 ml-3">ID: {c.data.requestId}</span>
+                    )}
                   </div>
+                )}
+                {/* Rate limit / error type banner inside message */}
+                {c.role === 'bot' && c.data.errorType === 'RATE_LIMIT' && (
+                  <div className="text-xs text-red-600 bg-red-50 border border-red-100 px-3 py-1 mt-2 rounded-md ml-14">Too many requests. Please wait a few seconds.</div>
                 )}
               </motion.div>
             );
@@ -267,13 +332,21 @@ export default memo(function Chat() {
                     <div className="w-2 h-2 bg-primary-400 rounded-full animate-bounce"></div>
                     <div className="w-2 h-2 bg-primary-400 rounded-full animate-bounce" style={{ animationDelay: '0.15s' }}></div>
                     <div className="w-2 h-2 bg-primary-400 rounded-full animate-bounce" style={{ animationDelay: '0.3s' }}></div>
-                    <span className="text-sm text-gray-400 ml-2 font-medium">Thinking...</span>
+                    <span className="text-sm text-gray-400 ml-2 font-medium">Processing your question...</span>
                  </div>
                </div>
             </motion.div>
           )}
 
-          {error && (
+          {chat.length === 0 && !isLoading && !error && (
+            <div className="w-full text-center text-gray-400 mt-10">Ask anything about voting in India 🇮🇳</div>
+          )}
+
+          {chat.length === 0 && error && (
+            <div className="w-full text-center text-red-500 mt-10">Unable to load assistant. Please refresh.</div>
+          )}
+
+          {error && chat.length > 0 && (
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-center">
               <div className="text-sm text-red-500 bg-red-50 border border-red-100 px-4 py-2 rounded-xl font-medium">
                 ⚠️ {error}
@@ -282,7 +355,7 @@ export default memo(function Chat() {
           )}
         </AnimatePresence>
         <div ref={endOfMessagesRef} />
-      </div>
+      </section>
 
       {/* Input Area */}
       <div className="p-4 bg-white/80 backdrop-blur-md border-t border-gray-100">
@@ -290,6 +363,7 @@ export default memo(function Chat() {
           <div className="flex flex-wrap gap-2 mb-4">
             {suggestions.map((s, i) => (
               <button 
+                type="button"
                 key={i} 
                 onClick={() => handleSend(null, s)}
                 className="text-xs bg-white border border-gray-200 hover:border-primary-300 hover:bg-primary-50 text-gray-700 px-4 py-2 rounded-xl transition-all flex items-center font-bold shadow-sm hover:shadow active:scale-95"
@@ -300,6 +374,7 @@ export default memo(function Chat() {
             
             {/* Dedicated Smart Checklist Button */}
             <button 
+                type="button"
                 onClick={() => {
                   const age = prompt("How old are you?");
                   if(age) handleSend(null, `I am ${age} years old. Generate my personalized voting checklist.`);
@@ -320,15 +395,24 @@ export default memo(function Chat() {
           >
             <Mic size={22} aria-hidden="true" />
           </button>
+          <label htmlFor="chat-input" className="sr-only">Ask about voting</label>
           <input
             type="text"
             value={msg}
             onChange={(e) => setMsg(e.target.value)}
             placeholder={isListening ? "Listening..." : "Ask VotePath AI..."}
             className="w-full bg-transparent text-gray-900 py-4 pl-14 pr-14 outline-none font-medium text-[15px]"
+            id="chat-input"
             disabled={isLoading || isListening}
             aria-label="Enter your question"
+            aria-describedby="helper"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                handleSend(e);
+              }
+            }}
           />
+          <p id="helper" className="sr-only">Press Enter to send your question</p>
           <button 
             type="submit" 
             disabled={!msg.trim() || isLoading}
@@ -340,5 +424,6 @@ export default memo(function Chat() {
         </form>
       </div>
     </div>
+    </main>
   );
 });

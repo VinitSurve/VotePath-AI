@@ -24,3 +24,5 @@ dist-ssr
 *.sw?
 
 .env
+assistant_all_outputs.text
+assistant_all_outputs.txt

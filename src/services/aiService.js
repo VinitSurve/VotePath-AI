@@ -3,24 +3,29 @@
  * Centralized API calls for clean architecture and better maintainability.
  */
 
-export const askVotePathAI = async (prompt, mode, language) => {
+export const askVotePathAI = async (prompt, mode, language, context = null) => {
   try {
     const res = await fetch("/api/ask", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ prompt, mode, language }),
+      body: JSON.stringify({ prompt, mode, language, context }),
     });
+    const payload = await res.json();
 
-    const data = await res.json();
-
-    if (!res.ok && !data.fallback) {
-      throw new Error(`Server error: ${res.status}`);
+    // Expecting unified response: { success, data, errorType, requestId }
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid server response');
     }
-    
-    // Return the pre-parsed JSON from the server, or use the fallback if it failed
-    return data.fallback ? data.fallback : data;
+
+    if (payload.success === false) {
+      console.error('API Error:', payload.errorType, payload.requestId);
+      // Still return the provided data (fallback) to the UI for graceful degradation
+      return payload.data;
+    }
+
+    return payload.data;
   } catch (error) {
     console.error("API Error:", error);
     throw error;

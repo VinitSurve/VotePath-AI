@@ -100,3 +100,23 @@ Full test case documentation: [`docs/testing.md`](docs/testing.md)
 - Keyboard-navigable interface (Tab / Enter)
 - High contrast text and UI components
 
+## 🔐 API Contract
+- Endpoint: `POST /api/ask`
+- Input:
+    - `prompt` (string, max 500 chars)
+- Responses:
+    - Structured JSON (title, steps, simple, tips, source)
+    - Error types: `RATE_LIMIT`, `INVALID_INPUT`, `AI_ERROR`
+- Safeguards:
+    - Input validation
+    - Rate limiting
+    - Fallback responses
+
+## 🛡 Reliability Guarantees
+
+- All responses are normalized to prevent UI crashes
+- Fallback system ensures a usable response even if the AI fails
+- Rate limiting prevents abuse (IP-based cooldown)
+- Timeout handling (8s) avoids long-running requests
+- Input validation ensures safe processing (prompt max 500 chars)
+
