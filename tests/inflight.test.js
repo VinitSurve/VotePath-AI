@@ -32,10 +32,10 @@ describe('In-flight deduplication', () => {
     }), 150)));
 
     // send two requests in parallel
-    const req1 = request(app).post('/api/ask').send({ prompt: 'dedupe-test' });
+    const req1 = request(app).post('/api/ask').set('x-forwarded-for', '10.0.0.1').send({ prompt: 'dedupe-test' });
     // small delay before sending second to ensure first registers in-flight
     await new Promise(r => setTimeout(r, 10));
-    const req2 = request(app).post('/api/ask').send({ prompt: 'dedupe-test' });
+    const req2 = request(app).post('/api/ask').set('x-forwarded-for', '10.0.0.2').send({ prompt: 'dedupe-test' });
 
     const [res1, res2] = await Promise.all([req1, req2]);
 
