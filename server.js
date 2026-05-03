@@ -22,6 +22,7 @@ import { createHash, randomUUID } from 'crypto';
 import { log } from './lib/logger.js';
 import { redis, redisIsMemory } from './lib/redis.js';
 import db from './lib/db.js';
+import { createTraceContext, startSpan, finishSpan } from './lib/tracing.js';
 
 dotenv.config();
 
@@ -57,8 +58,14 @@ let server;
 
 app.use((req, res, next) => {
   const requestId = randomUUID();
+  const traceId = String(req.headers["x-trace-id"] || requestId);
+  const spanId = String(req.headers["x-span-id"] || randomUUID());
   req.requestId = requestId;
+  req.traceContext = createTraceContext(traceId, null);
+  req.traceContext.parentSpanId = spanId;
   res.locals.requestId = requestId;
+  res.setHeader("x-request-id", requestId);
+  res.setHeader("x-trace-id", traceId);
   activeRequests += 1;
 
   res.on("finish", () => {
@@ -125,6 +132,7 @@ app.use(async (req, res, next) => {
 app.post("/api/ask", async (req, res) => {
   try {
     const requestId = req.requestId || randomUUID();
+    const requestSpan = startSpan("api.ask", req.traceContext || { traceId: requestId });
     const now = Date.now();
 
     if (!apiKey) throw new Error("No API Key");
@@ -193,6 +201,7 @@ User: "${prompt}"
         cachedResponse._meta.cached = true;
       }
       log("info", "Cache hit", { requestId, cacheKey });
+      finishSpan(requestSpan, log, { status: "cache_hit" });
       res.setHeader("X-Response-Time", String(Date.now() - now));
       res.setHeader("X-Cache", "hit");
       res.setHeader("Cache-Control", "private, max-age=60");
@@ -211,6 +220,7 @@ User: "${prompt}"
             pendingResponse._meta.cached = true;
           }
           log("info", "Request deduplication: cache materialized", { requestId, cacheKey });
+          finishSpan(requestSpan, log, { status: "deduped" });
           res.setHeader("X-Response-Time", String(Date.now() - now));
           res.setHeader("X-Cache", "deduped");
           return res.json({ success: true, data: pendingResponse, errorType: null, statusCode: 200, requestId });
@@ -279,14 +289,17 @@ User: "${prompt}"
       res.setHeader("X-Cache", "miss");
       res.setHeader("Cache-Control", "private, max-age=60");
       log("info", "AI response", { requestId, time: Date.now() - now, title: responseData?.title });
+      finishSpan(requestSpan, log, { status: "miss", responseTitle: responseData?.title });
       return res.json({ success: true, data: responseData, errorType: null, statusCode: 200, requestId });
     } finally {
       await redis.del(inflightKey);
     }
   } catch (e) {
     const requestIdErr = req.requestId || randomUUID();
+    const errorSpan = startSpan("api.ask.error", req.traceContext || { traceId: requestIdErr });
     log("error", "AI Error", { message: e.message, requestId: requestIdErr });
     const errorData = getFallbackResponse("AI_ERROR", requestIdErr);
+    finishSpan(errorSpan, log, { status: "error", message: e.message });
     return res.status(500).json({ success: false, data: errorData, errorType: "AI_ERROR", statusCode: 500, requestId: requestIdErr });
   }
 });

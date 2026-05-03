@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { askVotePathAI } from "../services/aiService";
 import { languageCodeMap } from "../utils/languageMap";
 import { normalizeMessage, placeholderMessage, errorFallbackMessage } from "../utils/normalizeMessage";
+import ChatConversation from "../components/chat/ChatConversation";
 
 export default memo(function Chat() {
   const [msg, setMsg] = useState("");
@@ -306,248 +307,55 @@ export default memo(function Chat() {
 
   return (
     <main role="main">
-    <div tabIndex="0" className="max-w-3xl mx-auto h-[85vh] flex flex-col bg-gradient-to-br from-indigo-50 via-white to-blue-50 backdrop-blur-xl rounded-2xl shadow-xl border border-white/50 overflow-hidden relative">
-      {/* ARIA live region for screen readers (polite) */}
-      <div aria-live="polite" role="status" className="sr-only">{ariaMessage}</div>
-      {/* Header */}
-      <div className="bg-white/50 p-4 border-b border-gray-100 flex items-center justify-between backdrop-blur-md sticky top-0 z-10">
+      <div tabIndex="0" className="max-w-3xl mx-auto h-[85vh] flex flex-col bg-gradient-to-br from-indigo-50 via-white to-blue-50 backdrop-blur-xl rounded-2xl shadow-xl border border-white/50 overflow-hidden relative">
+        <div aria-live="polite" role="status" className="sr-only">{ariaMessage}</div>
+        <div className="bg-white/50 p-4 border-b border-gray-100 flex items-center justify-between backdrop-blur-md sticky top-0 z-10">
           <div className="flex items-center space-x-3">
-          <div className="bg-primary-100 p-2 rounded-2xl shadow-inner">
-            <Bot className="text-primary-600" size={24} />
-            <div className="text-[10px] text-gray-400">System status: {isLoading ? 'Processing' : 'Ready'}</div>
+            <div className="bg-primary-100 p-2 rounded-2xl shadow-inner">
+              <Bot className="text-primary-600" size={24} />
+              <div className="text-[10px] text-gray-400">System status: {isLoading ? 'Processing' : 'Ready'}</div>
+            </div>
+            <div>
+              <h2 className="font-bold text-gray-900 text-lg">VotePath AI</h2>
+              <p className="text-xs text-primary-600 font-medium tracking-wide">Multi-Language Support</p>
+            </div>
           </div>
-          <div>
-            <h2 className="font-bold text-gray-900 text-lg">VotePath AI</h2>
-            <p className="text-xs text-primary-600 font-medium tracking-wide">Multi-Language Support</p>
+
+          <div className="flex items-center space-x-2 bg-white px-3 py-1.5 rounded-xl border border-gray-200 shadow-sm">
+            <Globe size={16} className="text-gray-400" aria-hidden="true" />
+            <select value={language} onChange={(e) => setLanguage(e.target.value)} className="bg-transparent text-sm font-bold text-gray-700 outline-none cursor-pointer" aria-label="Select Language">
+              <option value="English">English</option>
+              <option value="Hindi">हिंदी (Hindi)</option>
+              <option value="Marathi">मराठी (Marathi)</option>
+              <option value="Tamil">தமிழ் (Tamil)</option>
+            </select>
           </div>
         </div>
 
-        {/* Language Selector */}
-        <div className="flex items-center space-x-2 bg-white px-3 py-1.5 rounded-xl border border-gray-200 shadow-sm">
-          <Globe size={16} className="text-gray-400" aria-hidden="true" />
-          <select 
-            value={language} 
-            onChange={(e) => setLanguage(e.target.value)}
-            className="bg-transparent text-sm font-bold text-gray-700 outline-none cursor-pointer"
-            aria-label="Select Language"
-          >
-            <option value="English">English</option>
-            <option value="Hindi">हिंदी (Hindi)</option>
-            <option value="Marathi">मराठी (Marathi)</option>
-            <option value="Tamil">தமிழ் (Tamil)</option>
-          </select>
-        </div>
-      </div>
-
-      {/* Chat Area */}
-      {!isOnline && (
-        <div className="w-full text-center text-red-600 bg-red-50 border-t border-red-100 py-2 text-sm">You are offline. Please check your connection.</div>
-      )}
+        {!isOnline && <div className="w-full text-center text-red-600 bg-red-50 border-t border-red-100 py-2 text-sm">You are offline. Please check your connection.</div>}
         {isOnline && !isServerReachable && (
           <div role="alert" className="w-full text-center text-orange-600 bg-orange-50 border-t border-orange-100 py-2 text-sm">
             ⚠️ Server is unreachable. Your messages may not be sent.
             <button onClick={checkServerNow} className="ml-3 px-3 py-1 bg-orange-600 text-white rounded-md text-xs focus:ring-2 focus:ring-primary-500">Retry</button>
           </div>
         )}
-      <section aria-label="Chat conversation" className="flex-1 overflow-y-auto p-4 space-y-6 bg-gradient-to-b from-transparent to-gray-50/30">
-        <AnimatePresence initial={false}>
-          {chat.map((c, i) => {
-            // Compile text for speech
-            const textToSpeak = c.role === 'bot' ? `${c.data.title || ''}. ${c.data.simple || ''}` : '';
 
-            return (
-              <motion.div 
-                key={i} 
-                initial={{ opacity: 0, y: 15, scale: 0.98 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                className={`flex flex-col ${c.role === 'user' ? 'items-end' : 'items-start'}`}
-              >
-                <div className={`flex max-w-[85%] ${c.role === 'user' ? 'flex-row-reverse' : 'flex-row'}`}>
-                  <div className={`flex-shrink-0 flex items-center justify-center h-8 w-8 rounded-full shadow-sm ${
-                    c.role === 'user' ? 'bg-gray-100 ml-3' : 'bg-primary-100 mr-3 mt-1'
-                  }`}>
-                    {c.role === 'user' ? <User size={16} className="text-gray-600" /> : <Bot size={16} className="text-primary-600" />}
-                  </div>
-                  
-                  <div className={`p-5 rounded-2xl relative group ${
-                    c.role === 'user' 
-                      ? 'bg-primary-600 text-white rounded-tr-sm shadow-md' 
-                      : 'bg-white border border-gray-100 text-gray-800 rounded-tl-sm shadow-md'
-                  }`}>
-                    {c.role === 'bot' && textToSpeak && (
-                      <button 
-                        type="button"
-                        onClick={() => speakText(textToSpeak, i)}
-                        className={`absolute -right-10 top-2 p-2 rounded-full transition-all ${speakingIndex === i ? 'bg-accent-100 text-accent-600 animate-pulse' : 'bg-gray-50 text-gray-400 hover:text-primary-600 opacity-0 group-hover:opacity-100'}`}
-                        title="Read Aloud"
-                        aria-label={speakingIndex === i ? "Stop reading" : "Read aloud"}
-                      >
-                        {speakingIndex === i ? <VolumeX size={16} aria-hidden="true" /> : <Volume2 size={16} aria-hidden="true" />}
-                      </button>
-                    )}
-
-                    {c.role === 'user' ? (
-                      <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{c.text}</p>
-                    ) : (
-                      <div className="space-y-4">
-                        {c.data.title && <p className="font-extrabold text-xl text-gray-900 tracking-tight">{c.data.title}</p>}
-                        
-                        {c.data.steps && c.data.steps.length > 0 && (
-                          <div className="space-y-2 mt-2">
-                            {c.data.steps.map((s, idx) => (
-                              <div key={idx} className="flex items-start bg-gray-50/80 p-3.5 rounded-xl border border-gray-100 hover:border-primary-100 hover:bg-primary-50/50 transition-colors">
-                                <div className="flex-shrink-0 w-6 h-6 rounded-full bg-primary-100 text-primary-700 flex items-center justify-center font-bold text-xs mr-3 mt-0.5">
-                                  {idx + 1}
-                                </div>
-                                <div>
-                                  {s.title && <strong className="block text-gray-900 font-bold mb-0.5">{s.title}</strong>}
-                                  <span className="text-gray-600 text-[15px] leading-relaxed">{s.desc}</span>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-
-                        {c.data.tips && c.data.tips.length > 0 && (
-                          <div className="mt-4 bg-yellow-50/80 border border-yellow-100 p-4 rounded-xl">
-                            <strong className="flex items-center text-yellow-800 text-sm font-bold mb-2 uppercase tracking-wide">
-                              <Sparkles size={14} className="mr-1.5" /> Important Tips
-                            </strong>
-                            <ul className="text-sm text-yellow-700 space-y-1.5 font-medium ml-1">
-                              {c.data.tips.map((t, idx) => <li key={idx} className="flex items-start"><span className="mr-2 text-yellow-500">•</span> {t}</li>)}
-                            </ul>
-                          </div>
-                        )}
-
-                        {c.data.simple && (
-                          <div className="mt-4 bg-accent-50/50 border-l-4 border-accent-500 pl-4 py-2 rounded-r-lg">
-                            <p className="italic text-gray-700 text-[15px] font-medium leading-relaxed">
-                              {c.data.simple}
-                            </p>
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                        {/* Confidence / explainability tag */}
-                        {c.role === 'bot' && (
-                        <div className="text-xs text-blue-500 mt-3 flex items-center" aria-hidden="true">
-                          <span className="mr-1">✔</span>
-                          <span>Verified guidance based on official election procedures</span>
-                        </div>
-                        )}
-                  </div>
-                </div>
-                
-                {c.role === 'bot' && c.data.source && (
-                  <div className="flex items-center text-[11px] font-bold text-gray-400 mt-2 ml-14 bg-white/80 backdrop-blur-sm px-2.5 py-1 rounded-full shadow-sm border border-gray-100">
-                    <ShieldCheck size={12} className="text-green-500 mr-1.5" />
-                    Source: {
-                      (typeof c.data.source === 'string' && c.data.source.toLowerCase().includes('http')) ? (
-                        <a href={c.data.source} target="_blank" rel="noreferrer" className="text-green-600 underline">{c.data.source}</a>
-                      ) : c.data.source === 'Election Commission of India' ? (
-                        <a href="https://eci.gov.in" target="_blank" rel="noreferrer" className="text-green-600 underline">Election Commission of India</a>
-                      ) : (
-                        <span>{c.data.source}</span>
-                      )
-                    }
-
-                    {/* Response time and last-updated */}
-                    {c.data._meta?.responseTime && (
-                      <span className="text-xs text-gray-400 ml-3">⏱ {c.data._meta.responseTime}s</span>
-                    )}
-                    {c.data.lastUpdated && (
-                      <span className="text-xs text-gray-400 ml-3">Updated as per latest public election guidelines</span>
-                    )}
-                    {c.data.requestId && (
-                      <span className="text-[10px] text-gray-400 ml-3">ID: {c.data.requestId}</span>
-                    )}
-                  </div>
-                )}
-                {/* Copy button for bot messages */}
-                {c.role === 'bot' && (
-                  <div className="ml-14 mt-2 flex items-center space-x-2">
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        try {
-                          await navigator.clipboard.writeText((c.data.simple || c.data.title || '').toString());
-                          setCopiedIndex(i);
-                          setTimeout(() => setCopiedIndex(null), 2000);
-                        } catch {}
-                      }}
-                      className="text-xs bg-gray-100 px-2 py-1 rounded-md hover:bg-gray-200 transition-all"
-                      aria-label="Copy message"
-                    >
-                      Copy
-                    </button>
-                    {copiedIndex === i && (
-                      <span className="text-xs text-green-600">Copied ✓</span>
-                    )}
-                  </div>
-                )}
-                {/* Rate limit / error type banner inside message */}
-                {c.role === 'bot' && c.data.errorType === 'RATE_LIMIT' && (
-                  <div className="text-xs text-red-600 bg-red-50 border border-red-100 px-3 py-1 mt-2 rounded-md ml-14">Too many requests. Please wait a few seconds.</div>
-                )}
-              </motion.div>
-            );
-          })}
-          
-          {isLoading && (
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-start">
-              <div className="flex flex-row max-w-[80%] items-center">
-                <div className="flex-shrink-0 flex items-center justify-center h-8 w-8 rounded-full bg-primary-100 mr-3 shadow-sm">
-                  <Bot size={16} className="text-primary-600" />
-                </div>
-                {/* Skeleton bubble for loading */}
-                <div className="p-4 rounded-2xl rounded-tl-sm shadow-md flex flex-col space-y-2 items-start">
-                  <div className="w-48 h-3 bg-gray-200 rounded-md animate-pulse" />
-                  <div className="w-32 h-3 bg-gray-200 rounded-md animate-pulse" />
-                  <div className="w-40 h-3 bg-gray-200 rounded-md animate-pulse" />
-                </div>
-              </div>
-            </motion.div>
-          )}
-
-          {chat.length === 0 && !isLoading && !error && (
-            <div className="w-full text-center text-gray-400 mt-10">Ask anything about voting in India 🇮🇳</div>
-          )}
-
-          {chat.length === 0 && error && (
-            <div className="w-full text-center text-red-500 mt-10">Unable to load assistant. Please refresh.</div>
-          )}
-
-          {error && chat.length > 0 && (
-            <motion.div
-              initial={{ opacity: 0 }} 
-              animate={{ opacity: 1 }} 
-              className="flex justify-center gap-2 items-center"
-              role="alert"
-              aria-live="polite"
-              aria-atomic="true"
-            >
-              <div className="text-sm text-red-500 bg-red-50 border border-red-100 px-4 py-2 rounded-xl font-medium">
-                ⚠️ {error}
-                {retryCountdown > 0 && ` (${retryCountdown}s)`}
-              </div>
-              <button
-                onClick={handleRetry}
-                disabled={retryCountdown > 0 || isLoading}
-                className={`px-3 py-1 bg-red-600 text-white rounded-lg text-sm font-medium disabled:opacity-40 disabled:bg-gray-400 disabled:cursor-not-allowed hover:bg-red-700 transition-colors ${retryCountdown > 0 || isRetrying ? 'animate-pulse' : ''}`}
-                aria-label={retryCountdown > 0 ? `Retry in ${retryCountdown} seconds` : 'Retry request'}
-              >
-                {isRetrying ? 'Retrying...' : (retryCountdown > 0 ? (
-                  <span>
-                    Retry (<span aria-live="polite">{retryCountdown}s</span>)
-                  </span>
-                ) : 'Retry')}
-              </button>
-            </motion.div>
-          )}
-        </AnimatePresence>
-        <div ref={endOfMessagesRef} />
-      </section>
+        <ChatConversation
+          chat={chat}
+          isLoading={isLoading}
+          error={error}
+          retryCountdown={retryCountdown}
+          onRetry={handleRetry}
+          isRetrying={isRetrying}
+          onSpeak={speakText}
+          speakingIndex={speakingIndex}
+          copiedIndex={copiedIndex}
+          onCopy={(index) => {
+            setCopiedIndex(index);
+            setTimeout(() => setCopiedIndex(null), 2000);
+          }}
+          endOfMessagesRef={endOfMessagesRef}
+        />
 
       {/* Input Area */}
       <div className="p-4 bg-white/80 backdrop-blur-md border-t border-gray-100">
