@@ -8,6 +8,7 @@ import { normalizeMessage, placeholderMessage, errorFallbackMessage } from "../u
 
 export default memo(function Chat() {
   const [msg, setMsg] = useState("");
+  const [ariaMessage, setAriaMessage] = useState("");
   const [language, setLanguage] = useState("English");
   const [chat, setChat] = useState([
     {
@@ -32,6 +33,7 @@ export default memo(function Chat() {
   
   const { isELI5 } = useExplain();
   const endOfMessagesRef = useRef(null);
+  const inputRef = useRef(null);
   const [isOnline, setIsOnline] = useState(typeof navigator !== 'undefined' ? navigator.onLine : true);
 
   const scrollToBottom = () => {
@@ -63,10 +65,12 @@ export default memo(function Chat() {
   useEffect(() => {
     const onOffline = () => {
       setShowOfflineBanner(true);
+      setAriaMessage("You are offline");
     };
     const onOnline = () => {
       setShowOfflineBanner(false);
       setError(null);
+      setAriaMessage("Connection restored");
     };
     window.addEventListener('offline', onOffline);
     window.addEventListener('online', onOnline);
@@ -85,8 +89,10 @@ export default memo(function Chat() {
         });
 
         setIsServerReachable(res.ok || res.status < 500);
+        if (res.ok) setAriaMessage("Server reachable");
       } catch {
         setIsServerReachable(false);
+        setAriaMessage("Server is unreachable");
       }
     };
 
@@ -101,6 +107,21 @@ export default memo(function Chat() {
       window.removeEventListener("offline", () => setIsServerReachable(false));
     };
   }, []);
+
+  // Expose a manual server check for the banner retry button
+  const checkServerNow = async () => {
+    try {
+      const res = await fetch('/health', { method: 'HEAD', signal: AbortSignal.timeout(3000) });
+      const ok = res.ok || res.status < 500;
+      setIsServerReachable(ok);
+      setAriaMessage(ok ? 'Server reachable' : 'Server still unreachable');
+      inputRef.current?.focus();
+    } catch {
+      setIsServerReachable(false);
+      setAriaMessage('Server still unreachable');
+      inputRef.current?.focus();
+    }
+  };
 
   const speakText = useCallback((text, index) => {
     if (!('speechSynthesis' in window)) return;
@@ -129,23 +150,39 @@ export default memo(function Chat() {
     setError(null);
     setRetryCountdown(0);
     setIsRetrying(true);
+    setAriaMessage('Retrying your request');
     try {
       await handleSend(null, msg);
     } finally {
       setIsRetrying(false);
+      inputRef.current?.focus();
     }
   }, [msg]);
 
   const handleSend = useCallback(async (e, overrideMsg = null) => {
     if (e) e.preventDefault();
     const messageToSend = overrideMsg || msg;
-    if (!messageToSend.trim() || isLoading) return;
+    if (isLoading) return;
+    if (!messageToSend.trim()) {
+      setError('Please enter a question');
+      setAriaMessage('Please enter a question');
+      inputRef.current?.focus();
+      return;
+    }
+    if (messageToSend.length > 500) {
+      setError('Message too long (max 500 characters)');
+      setAriaMessage('Message too long (max 500 characters)');
+      inputRef.current?.focus();
+      return;
+    }
     if (!navigator.onLine) {
       setError('You are offline. Please check your connection.');
+      setAriaMessage('You are offline');
       return;
     }
     if (messageToSend.trim().length < 3) {
       setError('Please enter a meaningful question.');
+      setAriaMessage('Please enter a meaningful question');
       return;
     }
 
@@ -157,6 +194,7 @@ export default memo(function Chat() {
     setError(null);
     setRetryCountdown(0);
       setShowSentFeedback(true);
+      setAriaMessage('Message sent');
       setTimeout(() => setShowSentFeedback(false), 2000);
     const start = Date.now();
     // include last message content as simple one-step context
@@ -166,7 +204,7 @@ export default memo(function Chat() {
     let lastError = null;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
+          try {
         const parsed = await askVotePathAI(messageToSend, isELI5 ? "elis" : "normal", language, lastMessage);
 
         const timeTaken = ((Date.now() - start) / 1000).toFixed(1);
@@ -191,7 +229,7 @@ export default memo(function Chat() {
           err.message?.includes("RETRY_AFTER") ||
           err.message?.includes("503");
 
-        if (isRetryable && attempt < maxRetries) {
+          if (isRetryable && attempt < maxRetries) {
           const backoffMs = Math.pow(2, attempt - 1) * 1000;
 
           console.log("Retrying", {
@@ -200,6 +238,8 @@ export default memo(function Chat() {
             error: err.message
           });
 
+          // announce retry and wait
+          setAriaMessage('Retrying your request');
           await new Promise(r => setTimeout(r, backoffMs));
           continue;
         }
@@ -213,11 +253,14 @@ export default memo(function Chat() {
       if (lastError.message?.includes("429")) {
         setRetryCountdown(2);
         setError("Too many requests. Retry in 2 seconds...");
+        setAriaMessage('Retry failed, please try again');
       } else if (lastError.message?.includes("TIMEOUT")) {
         setRetryCountdown(3);
         setError("Request timed out. Retry in 3 seconds...");
+        setAriaMessage('Retry failed, please try again');
       } else {
-        setError(lastError.message || "AI unavailable. Showing verified fallback response.");
+        setError(lastError.message || "Something went wrong. Try again or check your connection.");
+        setAriaMessage('Something went wrong. Try again or check your connection.');
       }
 
       // Replace placeholder with error fallback
@@ -264,6 +307,8 @@ export default memo(function Chat() {
   return (
     <main role="main">
     <div tabIndex="0" className="max-w-3xl mx-auto h-[85vh] flex flex-col bg-gradient-to-br from-indigo-50 via-white to-blue-50 backdrop-blur-xl rounded-2xl shadow-xl border border-white/50 overflow-hidden relative">
+      {/* ARIA live region for screen readers (polite) */}
+      <div aria-live="polite" role="status" className="sr-only">{ariaMessage}</div>
       {/* Header */}
       <div className="bg-white/50 p-4 border-b border-gray-100 flex items-center justify-between backdrop-blur-md sticky top-0 z-10">
           <div className="flex items-center space-x-3">
@@ -299,7 +344,10 @@ export default memo(function Chat() {
         <div className="w-full text-center text-red-600 bg-red-50 border-t border-red-100 py-2 text-sm">You are offline. Please check your connection.</div>
       )}
         {isOnline && !isServerReachable && (
-          <div className="w-full text-center text-orange-600 bg-orange-50 border-t border-orange-100 py-2 text-sm">⚠️ Server is unreachable. Your messages may not be sent.</div>
+          <div role="alert" className="w-full text-center text-orange-600 bg-orange-50 border-t border-orange-100 py-2 text-sm">
+            ⚠️ Server is unreachable. Your messages may not be sent.
+            <button onClick={checkServerNow} className="ml-3 px-3 py-1 bg-orange-600 text-white rounded-md text-xs focus:ring-2 focus:ring-primary-500">Retry</button>
+          </div>
         )}
       <section aria-label="Chat conversation" className="flex-1 overflow-y-auto p-4 space-y-6 bg-gradient-to-b from-transparent to-gray-50/30">
         <AnimatePresence initial={false}>
@@ -487,9 +535,13 @@ export default memo(function Chat() {
                 onClick={handleRetry}
                 disabled={retryCountdown > 0 || isLoading}
                 className={`px-3 py-1 bg-red-600 text-white rounded-lg text-sm font-medium disabled:opacity-40 disabled:bg-gray-400 disabled:cursor-not-allowed hover:bg-red-700 transition-colors ${retryCountdown > 0 || isRetrying ? 'animate-pulse' : ''}`}
-                aria-label="Retry request"
+                aria-label={retryCountdown > 0 ? `Retry in ${retryCountdown} seconds` : 'Retry request'}
               >
-                {isRetrying ? 'Retrying...' : (retryCountdown > 0 ? `Retry (${retryCountdown}s)` : 'Retry')}
+                {isRetrying ? 'Retrying...' : (retryCountdown > 0 ? (
+                  <span>
+                    Retry (<span aria-live="polite">{retryCountdown}s</span>)
+                  </span>
+                ) : 'Retry')}
               </button>
             </motion.div>
           )}
