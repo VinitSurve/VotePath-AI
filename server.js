@@ -12,17 +12,18 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import helmet from "helmet";
 import path from "path";
 import { fileURLToPath } from "url";
 import compression from "compression";
 import { getFallbackResponse, FALLBACK_RESPONSES } from "./lib/fallbacks.js";
 import { validatePrompt, validateContext, validateLanguage } from "./lib/validation.js";
 import { CONFIG } from "./config.js";
-import { createHash, randomUUID } from 'crypto';
-import { log } from './lib/logger.js';
-import { redis, redisIsMemory } from './lib/redis.js';
-import db from './lib/db.js';
-import { createTraceContext, startSpan, finishSpan } from './lib/tracing.js';
+import { createHash, randomUUID } from "crypto";
+import { log } from "./lib/logger.js";
+import { redis, redisIsMemory } from "./lib/redis.js";
+import db, { pruneLogs } from "./lib/db.js";
+import { createTraceContext, startSpan, finishSpan } from "./lib/tracing.js";
 
 dotenv.config();
 
@@ -30,20 +31,33 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+app.set("trust proxy", true);
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(",").map((origin) => origin.trim()).filter(Boolean)
+  : [];
 app.use(cors({
-  origin: process.env.ALLOWED_ORIGINS
-    ? process.env.ALLOWED_ORIGINS.split(",")
-    : ["http://localhost:5173"]
+  origin: allowedOrigins,
+  credentials: false
 }));
 app.use(compression({ threshold: 1024 })); // Gzip responses > 1KB
 app.use(express.json());
-// Security headers (easy detectable security signals)
-app.use((req, res, next) => {
-  res.setHeader("X-Content-Type-Options", "nosniff");
-  res.setHeader("X-Frame-Options", "DENY");
-  res.setHeader("X-XSS-Protection", "1; mode=block");
-  next();
-});
+app.use(helmet({
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      "default-src": ["'self'"],
+      "base-uri": ["'self'"],
+      "object-src": ["'none'"],
+      "frame-ancestors": ["'none'"],
+      "img-src": ["'self'", "data:"],
+      "script-src": ["'self'"],
+      "style-src": ["'self'", "'unsafe-inline'"],
+      "connect-src": ["'self'"],
+      "font-src": ["'self'", "data:"]
+    }
+  },
+  crossOriginEmbedderPolicy: false
+}));
 
 // Serve static files from the React app
 app.use(express.static(path.join(__dirname, "dist")));
@@ -58,24 +72,22 @@ let server;
 
 app.use((req, res, next) => {
   const requestId = randomUUID();
-  const traceId = String(req.headers["x-trace-id"] || requestId);
-  const spanId = String(req.headers["x-span-id"] || randomUUID());
   req.requestId = requestId;
-  req.traceContext = createTraceContext(traceId, null);
-  req.traceContext.parentSpanId = spanId;
+  req.traceContext = createTraceContext(requestId, null);
   res.locals.requestId = requestId;
   res.setHeader("x-request-id", requestId);
-  res.setHeader("x-trace-id", traceId);
+  res.setHeader("x-trace-id", requestId);
   activeRequests += 1;
 
   res.on("finish", () => {
     activeRequests = Math.max(0, activeRequests - 1);
     try {
-      const prompt = req.body && typeof req.body === "object" ? req.body.prompt ?? null : null;
+      const prompt = req.body && typeof req.body === "object" ? String(req.body.prompt ?? "").slice(0, 100) : null;
       db.prepare(`
 INSERT INTO logs (id, prompt, status, createdAt)
 VALUES (?, ?, ?, ?)
 `).run(requestId, prompt, String(res.statusCode), Date.now());
+      pruneLogs();
     } catch (e) {
       log("warn", "DB log write failed", { requestId, message: e.message });
     }
@@ -85,11 +97,19 @@ VALUES (?, ?, ?, ?)
 });
 
 app.use((req, res, next) => {
-  if (!req.path.startsWith("/api")) {
+  if (!req.path.startsWith("/api") && req.path !== "/metrics") {
     return next();
   }
 
   const key = req.headers["x-api-key"];
+  if (process.env.NODE_ENV === "production" && !process.env.API_KEY) {
+    return res.status(500).json({
+      success: false,
+      errorType: "CONFIG_ERROR",
+      statusCode: 500
+    });
+  }
+
   if (process.env.API_KEY && key !== process.env.API_KEY) {
     return res.status(401).json({
       success: false,
@@ -106,7 +126,7 @@ app.use(async (req, res, next) => {
     return next();
   }
 
-  const userIP = String(req.headers["x-forwarded-for"] || req.ip || "unknown").split(",")[0].trim();
+  const userIP = req.ip || "unknown";
   const rateKey = `rate_limit:${userIP}`;
 
   try {
@@ -135,7 +155,34 @@ app.post("/api/ask", async (req, res) => {
     const requestSpan = startSpan("api.ask", req.traceContext || { traceId: requestId });
     const now = Date.now();
 
-    if (!apiKey) throw new Error("No API Key");
+    if (!apiKey) {
+      if (process.env.NODE_ENV === "production") {
+        throw new Error("No API Key");
+      }
+      const fallbackResponse = {
+        ...FALLBACK_RESPONSES.DEFAULT,
+        lastUpdated: new Date().toISOString(),
+        requestId
+      };
+      const responseData = {
+        ...fallbackResponse,
+        requestId,
+        _meta: {
+          temperature: 0.3,
+          topP: 0.8,
+          responseTime: Date.now() - now,
+          cached: false,
+          timeout: 8000,
+          retryable: false
+        }
+      };
+
+      res.setHeader("X-Response-Time", String(Date.now() - now));
+      res.setHeader("X-Cache", "miss");
+      res.setHeader("Cache-Control", "private, max-age=60");
+      finishSpan(requestSpan, log, { status: "fallback_no_api_key" });
+      return res.json({ success: true, data: responseData, errorType: null, statusCode: 200, requestId });
+    }
 
     const { prompt, mode, language = "English", context = null } = req.body;
 
@@ -330,7 +377,7 @@ app.get("/metrics", async (req, res) => {
       memory: process.memoryUsage().heapUsed
     });
   } catch (e) {
-    res.status(500).json({ error: 'metrics_unavailable' });
+    res.status(500).json({ error: "metrics_unavailable" });
   }
 });
 

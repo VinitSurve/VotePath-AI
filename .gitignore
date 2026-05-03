@@ -24,5 +24,8 @@ dist-ssr
 *.sw?
 
 .env
+.env.*
+data.db
+*.log
 assistant_all_outputs.text
 assistant_all_outputs.txt
