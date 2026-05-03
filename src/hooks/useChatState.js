@@ -95,8 +95,11 @@ export function useChatState(isELI5, language, setAriaMessage) {
         lastError = err;
         const isRetryable = err.message?.includes("TIMEOUT") || err.message?.includes("RETRY_AFTER") || err.message?.includes("503");
         if (isRetryable && attempt < maxRetries) {
-          const backoffMs = Math.pow(2, attempt - 1) * 1000;
-          setAriaMessage("Retrying your request");
+          // Exponential backoff with jitter: base * 2^(attempt-1) + random(0, base)
+          const baseMs = Math.pow(2, attempt - 1) * 1000;
+          const jitterMs = Math.random() * Math.min(1000, baseMs); // Jitter up to base or 1 second
+          const backoffMs = baseMs + jitterMs;
+          setAriaMessage(`Retrying your request in ${Math.ceil(backoffMs / 1000)}s`);
           await new Promise((resolve) => setTimeout(resolve, backoffMs));
           continue;
         }

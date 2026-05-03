@@ -25,6 +25,9 @@ import { log } from "./lib/logger.js";
 import { redis, redisIsMemory } from "./lib/redis.js";
 import db, { pruneLogs } from "./lib/db.js";
 import { createTraceContext, startSpan, finishSpan } from "./lib/tracing.js";
+import { AIService } from "./lib/services/aiService.js";
+import { CacheService } from "./lib/services/cacheService.js";
+import { DBService } from "./lib/services/dbService.js";
 
 dotenv.config();
 
@@ -69,7 +72,12 @@ app.use(helmet({
 // Serve static files from the React app
 app.use(express.static(path.join(__dirname, "dist")));
 
+// Initialize service layer
 const apiKey = process.env.GEMINI_API_KEY;
+const aiService = new AIService(apiKey);
+const cacheService = new CacheService(redis, CONFIG);
+const dbService = new DBService(db);
+
 const genAI = new GoogleGenerativeAI(apiKey || "DUMMY_KEY");
 const ResponseSchema = z.object({
   title: z.string(),
@@ -136,10 +144,7 @@ app.use((req, res, next) => {
     try {
       const rawPrompt = req.body && typeof req.body === "object" ? req.body.prompt : null;
       const promptHash = rawPrompt ? createHash("sha256").update(String(rawPrompt)).digest("hex") : null;
-      db.prepare(`
-INSERT INTO logs (id, prompt, status, createdAt)
-VALUES (?, ?, ?, ?)
-`).run(requestId, promptHash, String(res.statusCode), Date.now());
+      dbService.logRequest(requestId, promptHash, res.statusCode);
       pruneLogs();
     } catch (e) {
       log("warn", "DB log write failed", { requestId, message: e.message });
@@ -262,12 +267,12 @@ app.post("/api/ask", async (req, res) => {
 
     const { prompt, mode, language = "English", context = null } = req.body;
 
-    const safePrompt = sanitize(prompt);
-
+    // Validate inputs
     const promptValidation = validatePrompt(prompt);
     if (!promptValidation.valid) {
       log("warn", "Invalid input", { requestId, reason: promptValidation.reason });
       const errorData = getFallbackResponse("INVALID_INPUT", requestId);
+      finishSpan(requestSpan, log, { status: "invalid_input" });
       return res.status(400).json({ success: false, data: errorData, errorType: "INVALID_INPUT", statusCode: 400, requestId });
     }
 
@@ -275,6 +280,7 @@ app.post("/api/ask", async (req, res) => {
     if (!contextValidation.valid) {
       log("warn", "Invalid context", { requestId });
       const errorData = getFallbackResponse("INVALID_INPUT", requestId);
+      finishSpan(requestSpan, log, { status: "invalid_context" });
       return res.status(400).json({ success: false, data: errorData, errorType: "INVALID_INPUT", statusCode: 400, requestId });
     }
 
@@ -286,42 +292,16 @@ app.post("/api/ask", async (req, res) => {
     const languageValidation = validateLanguage(language);
     const finalLanguage = languageValidation.value;
 
-    const model = genAI.getGenerativeModel({
-      model: "gemini-3.1-flash-lite-preview",
-      generationConfig: {
-        responseMimeType: "application/json",
-        temperature: 0.3,
-        topP: 0.8,
-        maxOutputTokens: 512,
-      }
-    });
-
-    const promptText = `
-You are VotePath AI, assistant for Indian elections.${mode === "elis" ? " Explain simply." : ""}
-
-Instructions:
-- IMPORTANT: Return ONLY a single valid JSON object with the exact schema described below. Do NOT include any surrounding explanation, markdown, or extra text.
-- If you cannot produce valid JSON, return this exact fallback JSON object: {"title":"I can't answer that right now","steps":[],"simple":"","tips":[],"source":""}
-- Respond ONLY in ${finalLanguage}.
-- Return JSON: {title, steps[], simple, tips[], source}
-- Off-topic → title="Off-topic Question", simple="I answer Indian election questions only."
-- Elections → steps=[{title, desc}], source="Election Commission of India"
-- Translate values to ${finalLanguage}, keys stay English
-- Max 120 words${finalContext ? `\nContext: ${finalContext}` : ""}
-
-User Input:
-"""${safePrompt}"""
-`;
-
+    // Generate cache key
     const requestHash = createHash("sha256")
       .update(`${String(prompt)}::${String(finalContext)}::${finalLanguage}::${String(mode || "")}`)
       .digest("hex");
     const cacheKey = `cache:${requestHash}`;
     const inflightKey = `inflight:${requestHash}`;
 
-    const cachedRaw = await redis.get(cacheKey);
-    if (cachedRaw) {
-      const cachedResponse = JSON.parse(cachedRaw);
+    // Check cache first
+    const cachedResponse = await cacheService.getCached(cacheKey);
+    if (cachedResponse) {
       cachedResponse.requestId = requestId;
       if (cachedResponse._meta) {
         cachedResponse._meta.cached = true;
@@ -334,59 +314,38 @@ User Input:
       return res.json({ success: true, data: cachedResponse, errorType: null, statusCode: 200, requestId });
     }
 
-    const lockAcquired = await redis.set(inflightKey, requestId, "NX", "PX", 10000);
+    // Try to acquire inflight lock
+    const lockAcquired = await cacheService.acquireInflightLock(inflightKey, requestId);
     if (!lockAcquired) {
-      const deadline = Date.now() + 10000;
-      while (Date.now() < deadline) {
-        const pendingRaw = await redis.get(cacheKey);
-        if (pendingRaw) {
-          const pendingResponse = JSON.parse(pendingRaw);
-          pendingResponse.requestId = requestId;
-          if (pendingResponse._meta) {
-            pendingResponse._meta.cached = true;
-          }
-          log("info", "Request deduplication: cache materialized", { requestId, cacheKey });
-          finishSpan(requestSpan, log, { status: "deduped" });
-          res.setHeader("X-Response-Time", String(Date.now() - now));
-          res.setHeader("X-Cache", "deduped");
-          return res.json({ success: true, data: pendingResponse, errorType: null, statusCode: 200, requestId });
+      // Wait for inflight result
+      const pendingResponse = await cacheService.waitForInflightCache(cacheKey);
+      if (pendingResponse) {
+        pendingResponse.requestId = requestId;
+        if (pendingResponse._meta) {
+          pendingResponse._meta.cached = true;
         }
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        log("info", "Request deduplication: cache materialized", { requestId, cacheKey });
+        finishSpan(requestSpan, log, { status: "deduped" });
+        res.setHeader("X-Response-Time", String(Date.now() - now));
+        res.setHeader("X-Cache", "deduped");
+        return res.json({ success: true, data: pendingResponse, errorType: null, statusCode: 200, requestId });
       }
+      // Timeout: fall through to generate
     }
 
-    let parsed;
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 8000);
+      // Call AI service
+      const aiResult = await aiService.generateResponse(prompt, mode, finalLanguage, finalContext);
 
-      try {
-        const result = await model.generateContent(promptText, { signal: controller.signal });
-        const text = result.response.text();
-        try {
-          parsed = ResponseSchema.parse(JSON.parse(text));
-          if (parsed.title === "Off-topic Question") {
-            log("info", "Off-topic detected", { requestId });
-          }
-          const englishWords = parsed.simple?.match(/\b(the|is|are|and)\b/gi)?.length || 0;
-          if (language !== "English" && englishWords > 5) {
-            log("warn", "Language mismatch", { requestId, language });
-          }
-        } catch (parseErr) {
-          log("error", "JSON parse error", { requestId, text: text.slice(0, 100) });
-          parsed = FALLBACK_RESPONSES.DEFAULT;
-        }
-      } catch (genErr) {
-        let errorType = "GENERATION_ERROR";
-        if (genErr.name === "AbortError") errorType = "TIMEOUT";
-        if (genErr.message?.includes("429")) errorType = "RATE_LIMIT";
-        if (genErr.message?.toLowerCase().includes("safety")) errorType = "SAFETY_FILTER";
-        log("error", "Model error", { requestId, errorType, message: genErr.message });
+      let parsed;
+      if (aiResult.success && aiResult.data) {
+        parsed = aiResult.data;
+      } else {
+        log("error", "AI service error", { requestId, errorType: aiResult.errorType });
         parsed = FALLBACK_RESPONSES.DEFAULT;
-      } finally {
-        clearTimeout(timeout);
       }
 
+      // Ensure all required fields
       parsed = parsed || FALLBACK_RESPONSES.DEFAULT;
       parsed.title = parsed.title || FALLBACK_RESPONSES.DEFAULT.title;
       parsed.steps = parsed.steps || FALLBACK_RESPONSES.DEFAULT.steps;
@@ -409,7 +368,8 @@ User Input:
         }
       };
 
-      await redis.set(cacheKey, JSON.stringify(responseData), "EX", Math.max(1, Math.floor(CONFIG.CACHE_TTL / 1000)));
+      // Cache the response
+      await cacheService.setCached(cacheKey, responseData, Math.max(1, Math.floor(CONFIG.CACHE_TTL / 1000)));
 
       res.setHeader("X-Response-Time", String(Date.now() - now));
       res.setHeader("X-Cache", "miss");
@@ -418,7 +378,7 @@ User Input:
       finishSpan(requestSpan, log, { status: "miss", responseTitle: responseData?.title });
       return res.json({ success: true, data: responseData, errorType: null, statusCode: 200, requestId });
     } finally {
-      await redis.del(inflightKey);
+      await cacheService.releaseInflightLock(inflightKey);
     }
   } catch (e) {
     const requestIdErr = req.requestId || randomUUID();
