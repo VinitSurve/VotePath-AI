@@ -1,26 +1,18 @@
 import request from "supertest";
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { app } from "../server.js";
 
-const originalApiKey = process.env.API_KEY;
-
-afterEach(() => {
-  if (originalApiKey === undefined) {
-    delete process.env.API_KEY;
-  } else {
-    process.env.API_KEY = originalApiKey;
-  }
-});
-
 describe("GET /ready", () => {
-  it("reports readiness based on GEMINI_API_KEY presence", async () => {
-    delete process.env.API_KEY;
-
+  it("reports readiness in the unified response contract", async () => {
     const res = await request(app).get("/ready");
-    const expectedStatus = process.env.GEMINI_API_KEY ? 200 : 500;
 
-    expect(res.status).toBe(expectedStatus);
-    expect(res.body).toHaveProperty("ready");
-    expect(res.body.ready).toBe(Boolean(process.env.GEMINI_API_KEY));
+    expect(res.status).toBe(process.env.GEMINI_API_KEY ? 200 : 500);
+    expect(res.body).toHaveProperty("success");
+    expect(res.body).toHaveProperty("data");
+    expect(res.body).toHaveProperty("errorType");
+    expect(res.body).toHaveProperty("statusCode");
+    expect(res.body).toHaveProperty("requestId");
+    expect(res.body.data).toHaveProperty("ready");
+    expect(res.body.data.ready).toBe(Boolean(process.env.GEMINI_API_KEY));
   });
 });

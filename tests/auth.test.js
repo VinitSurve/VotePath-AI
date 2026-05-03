@@ -15,12 +15,15 @@ vi.mock("@google/generative-ai", () => {
   };
 });
 
-import { app } from "../server.js";
+import { app, clearRequestLog } from "../server.js";
 
-const originalApiKey = process.env.API_KEY;
+const originalNodeEnv = process.env.NODE_ENV;
+const originalApiKey = process.env.API_KEY_MAIN;
 
 beforeEach(() => {
-  process.env.API_KEY = "test-api-key";
+  clearRequestLog();
+  process.env.NODE_ENV = "production";
+  process.env.API_KEY_MAIN = "test-api-key";
   mockGenerate.mockReset();
   mockGenerate.mockResolvedValue({
     response: {
@@ -36,10 +39,11 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  process.env.NODE_ENV = originalNodeEnv;
   if (originalApiKey === undefined) {
-    delete process.env.API_KEY;
+    delete process.env.API_KEY_MAIN;
   } else {
-    process.env.API_KEY = originalApiKey;
+    process.env.API_KEY_MAIN = originalApiKey;
   }
 });
 

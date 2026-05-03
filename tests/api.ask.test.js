@@ -75,6 +75,29 @@ describe("POST /api/ask", () => {
     expect(res.body.data).toBeDefined();
   });
 
+  it("falls back when the model returns the wrong object shape", async () => {
+    mockGenerate.mockResolvedValue({
+      response: {
+        text: () => JSON.stringify({
+          title: 123,
+          steps: "bad",
+          simple: null,
+          tips: [1],
+          source: 42
+        })
+      }
+    });
+
+    const res = await request(app).post("/api/ask").send({
+      prompt: "shape test"
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.title).toBe("How to vote");
+    expect(Array.isArray(res.body.data.steps)).toBe(true);
+    expect(Array.isArray(res.body.data.tips)).toBe(true);
+  });
+
   it("returns RATE_LIMIT when requests are too frequent", async () => {
     // First request should succeed
     mockGenerate.mockResolvedValueOnce({

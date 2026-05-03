@@ -13,13 +13,14 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import helmet from "helmet";
+import { z } from "zod";
 import path from "path";
 import { fileURLToPath } from "url";
 import compression from "compression";
 import { getFallbackResponse, FALLBACK_RESPONSES } from "./lib/fallbacks.js";
 import { validatePrompt, validateContext, validateLanguage } from "./lib/validation.js";
 import { CONFIG } from "./config.js";
-import { createHash, randomUUID } from "crypto";
+import { createHash, randomUUID, timingSafeEqual } from "crypto";
 import { log } from "./lib/logger.js";
 import { redis, redisIsMemory } from "./lib/redis.js";
 import db, { pruneLogs } from "./lib/db.js";
@@ -31,12 +32,18 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-app.set("trust proxy", true);
-const allowedOrigins = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(",").map((origin) => origin.trim()).filter(Boolean)
-  : [];
+const TRUSTED_PROXIES = ["127.0.0.1", "::1"];
+app.set("trust proxy", function (ip) {
+  return TRUSTED_PROXIES.includes(ip);
+});
+const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(",").map((origin) => origin.trim()).filter(Boolean);
+if (!allowedOrigins || allowedOrigins.includes("*")) {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("Invalid CORS configuration");
+  }
+}
 app.use(cors({
-  origin: allowedOrigins,
+  origin: allowedOrigins || ["http://localhost:5173"],
   credentials: false
 }));
 app.use(compression({ threshold: 1024 })); // Gzip responses > 1KB
@@ -64,8 +71,53 @@ app.use(express.static(path.join(__dirname, "dist")));
 
 const apiKey = process.env.GEMINI_API_KEY;
 const genAI = new GoogleGenerativeAI(apiKey || "DUMMY_KEY");
+const ResponseSchema = z.object({
+  title: z.string(),
+  steps: z.array(z.object({
+    title: z.string(),
+    desc: z.string()
+  })),
+  simple: z.string(),
+  tips: z.array(z.string()),
+  source: z.string()
+});
 
-// Fallback responses are now imported from lib/fallbacks.js
+function sanitize(input) {
+  return String(input ?? "").replace(/[{}[\]<>]/g, "");
+}
+
+function sendEnvelope(res, statusCode, data = null, errorType = null, requestId = null) {
+  return res.status(statusCode).json({
+    success: statusCode < 400,
+    data,
+    errorType,
+    statusCode,
+    requestId
+  });
+}
+
+function authFailedKey(route, ip) {
+  return `auth_fail:${route}:${ip}`;
+}
+
+async function incrementAuthFailure(route, ip) {
+  const key = authFailedKey(route, ip);
+  try {
+    const count = await redis.incr(key);
+    if (count === 1) {
+      await redis.pexpire(key, 60000);
+    }
+    return count;
+  } catch {
+    return 1;
+  }
+}
+
+function constantTimeMatches(candidate, expected) {
+  const candidateHash = createHash("sha256").update(String(candidate || "")).digest();
+  const expectedHash = createHash("sha256").update(String(expected || "")).digest();
+  return candidateHash.length === expectedHash.length && timingSafeEqual(candidateHash, expectedHash);
+}
 
 let activeRequests = 0;
 let server;
@@ -82,11 +134,12 @@ app.use((req, res, next) => {
   res.on("finish", () => {
     activeRequests = Math.max(0, activeRequests - 1);
     try {
-      const prompt = req.body && typeof req.body === "object" ? String(req.body.prompt ?? "").slice(0, 100) : null;
+      const rawPrompt = req.body && typeof req.body === "object" ? req.body.prompt : null;
+      const promptHash = rawPrompt ? createHash("sha256").update(String(rawPrompt)).digest("hex") : null;
       db.prepare(`
 INSERT INTO logs (id, prompt, status, createdAt)
 VALUES (?, ?, ?, ?)
-`).run(requestId, prompt, String(res.statusCode), Date.now());
+`).run(requestId, promptHash, String(res.statusCode), Date.now());
       pruneLogs();
     } catch (e) {
       log("warn", "DB log write failed", { requestId, message: e.message });
@@ -96,26 +149,45 @@ VALUES (?, ?, ?, ?)
   next();
 });
 
-app.use((req, res, next) => {
-  if (!req.path.startsWith("/api") && req.path !== "/metrics") {
+app.use("/api", async (req, res, next) => {
+  if (process.env.NODE_ENV !== "production") {
     return next();
   }
 
-  const key = req.headers["x-api-key"];
-  if (process.env.NODE_ENV === "production" && !process.env.API_KEY) {
-    return res.status(500).json({
-      success: false,
-      errorType: "CONFIG_ERROR",
-      statusCode: 500
-    });
+  if (!process.env.API_KEY_MAIN) {
+    incrementAuthFailure("api", req.ip || "unknown");
+    return sendEnvelope(res, 500, null, "CONFIG_ERROR", req.requestId);
   }
 
-  if (process.env.API_KEY && key !== process.env.API_KEY) {
-    return res.status(401).json({
-      success: false,
-      errorType: "UNAUTHORIZED",
-      statusCode: 401
-    });
+  const key = req.headers["x-api-key"];
+  if (!constantTimeMatches(key, process.env.API_KEY_MAIN)) {
+    const failures = await incrementAuthFailure("api", req.ip || "unknown");
+    if (failures >= 3) {
+      return sendEnvelope(res, 429, null, "RATE_LIMITED", req.requestId);
+    }
+    return sendEnvelope(res, 401, null, "UNAUTHORIZED", req.requestId);
+  }
+
+  return next();
+});
+
+app.use("/metrics", async (req, res, next) => {
+  if (process.env.NODE_ENV !== "production") {
+    return next();
+  }
+
+  if (!process.env.API_KEY_METRICS) {
+    incrementAuthFailure("metrics", req.ip || "unknown");
+    return sendEnvelope(res, 500, null, "CONFIG_ERROR", req.requestId);
+  }
+
+  const key = req.headers["x-api-key"];
+  if (!constantTimeMatches(key, process.env.API_KEY_METRICS)) {
+    const failures = await incrementAuthFailure("metrics", req.ip || "unknown");
+    if (failures >= 3) {
+      return sendEnvelope(res, 429, null, "RATE_LIMITED", req.requestId);
+    }
+    return sendEnvelope(res, 401, null, "UNAUTHORIZED", req.requestId);
   }
 
   return next();
@@ -123,6 +195,10 @@ app.use((req, res, next) => {
 
 app.use(async (req, res, next) => {
   if (req.method !== "POST" || req.path !== "/api/ask") {
+    return next();
+  }
+
+  if (process.env.ENABLE_RATE_LIMIT_TEST === "false") {
     return next();
   }
 
@@ -186,6 +262,8 @@ app.post("/api/ask", async (req, res) => {
 
     const { prompt, mode, language = "English", context = null } = req.body;
 
+    const safePrompt = sanitize(prompt);
+
     const promptValidation = validatePrompt(prompt);
     if (!promptValidation.valid) {
       log("warn", "Invalid input", { requestId, reason: promptValidation.reason });
@@ -231,7 +309,8 @@ Instructions:
 - Translate values to ${finalLanguage}, keys stay English
 - Max 120 words${finalContext ? `\nContext: ${finalContext}` : ""}
 
-User: "${prompt}"
+User Input:
+"""${safePrompt}"""
 `;
 
     const requestHash = createHash("sha256")
@@ -285,7 +364,7 @@ User: "${prompt}"
         const result = await model.generateContent(promptText, { signal: controller.signal });
         const text = result.response.text();
         try {
-          parsed = JSON.parse(text);
+          parsed = ResponseSchema.parse(JSON.parse(text));
           if (parsed.title === "Off-topic Question") {
             log("info", "Off-topic detected", { requestId });
           }
@@ -353,15 +432,15 @@ User: "${prompt}"
 
 // Health check endpoint for monitoring and load balancers
 app.get("/health", (req, res) => {
-  res.json({ status: "ok", uptime: process.uptime(), timestamp: new Date().toISOString() });
+  return sendEnvelope(res, 200, { status: "ok", uptime: process.uptime(), timestamp: new Date().toISOString() }, null, req.requestId);
 });
 
 app.get("/ready", (req, res) => {
   if (!process.env.GEMINI_API_KEY) {
-    return res.status(500).json({ ready: false });
+    return sendEnvelope(res, 500, { ready: false }, "CONFIG_ERROR", req.requestId);
   }
 
-  return res.json({ ready: true });
+  return sendEnvelope(res, 200, { ready: true }, null, req.requestId);
 });
 
 // Metrics endpoint for lightweight observability
@@ -369,15 +448,13 @@ app.get("/metrics", async (req, res) => {
   try {
     const cacheKeys = await redis.keys("cache:*");
     const requestCountRow = db.prepare("SELECT COUNT(*) AS count FROM logs").get();
-    res.json({
+    return sendEnvelope(res, 200, {
       uptime: process.uptime(),
       requests: requestCountRow?.count || 0,
-      cacheSize: Array.isArray(cacheKeys) ? cacheKeys.length : 0,
-      activeRequests,
-      memory: process.memoryUsage().heapUsed
-    });
+      cacheSize: Array.isArray(cacheKeys) ? cacheKeys.length : 0
+    }, null, req.requestId);
   } catch (e) {
-    res.status(500).json({ error: "metrics_unavailable" });
+    return sendEnvelope(res, 500, null, "METRICS_UNAVAILABLE", req.requestId);
   }
 });
 
@@ -398,6 +475,9 @@ export function clearRequestLog() {
         redis.del(key);
       }
       for (const key of redis.keys("inflight:*")) {
+        redis.del(key);
+      }
+      for (const key of redis.keys("auth_fail:*")) {
         redis.del(key);
       }
     }

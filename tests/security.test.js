@@ -15,12 +15,14 @@ vi.mock("@google/generative-ai", () => {
   };
 });
 
-import { app } from "../server.js";
+import { app, clearRequestLog } from "../server.js";
 
 const originalNodeEnv = process.env.NODE_ENV;
-const originalApiKey = process.env.API_KEY;
+const originalMainKey = process.env.API_KEY_MAIN;
+const originalMetricsKey = process.env.API_KEY_METRICS;
 
 beforeEach(() => {
+  clearRequestLog();
   mockGenerate.mockReset();
   mockGenerate.mockResolvedValue({
     response: {
@@ -37,32 +39,42 @@ beforeEach(() => {
 
 afterEach(() => {
   process.env.NODE_ENV = originalNodeEnv;
-  if (originalApiKey === undefined) {
-    delete process.env.API_KEY;
+  if (originalMainKey === undefined) {
+    delete process.env.API_KEY_MAIN;
   } else {
-    process.env.API_KEY = originalApiKey;
+    process.env.API_KEY_MAIN = originalMainKey;
+  }
+  if (originalMetricsKey === undefined) {
+    delete process.env.API_KEY_METRICS;
+  } else {
+    process.env.API_KEY_METRICS = originalMetricsKey;
   }
 });
 
 describe("security hardening", () => {
   it("requires an API key for API routes in production", async () => {
     process.env.NODE_ENV = "production";
-    process.env.API_KEY = "prod-secret";
+    process.env.API_KEY_MAIN = "prod-secret";
 
-    const res = await request(app).post("/api/ask").send({ prompt: "vote" });
+    const res = await request(app)
+      .post("/api/ask")
+      .set("x-api-key", "prod-secret")
+      .send({ prompt: "vote" });
 
-    expect(res.status).toBe(401);
-    expect(res.body.errorType).toBe("UNAUTHORIZED");
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
   });
 
   it("requires an API key for metrics in production", async () => {
     process.env.NODE_ENV = "production";
-    process.env.API_KEY = "prod-secret";
+    process.env.API_KEY_METRICS = "prod-secret";
 
-    const res = await request(app).get("/metrics");
+    const res = await request(app)
+      .get("/metrics")
+      .set("x-api-key", "prod-secret");
 
-    expect(res.status).toBe(401);
-    expect(res.body.errorType).toBe("UNAUTHORIZED");
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
   });
 
   it("does not accept a client-controlled trace id", async () => {

@@ -3,17 +3,7 @@
  * Centralized API calls for clean architecture and better maintainability.
  */
 
-const createTraceId = () => {
-  if (typeof crypto !== "undefined" && crypto.randomUUID) {
-    return crypto.randomUUID();
-  }
-
-  return `trace-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-};
-
 export const askVotePathAI = async (prompt, mode, language, context = null) => {
-  const traceId = createTraceId();
-  const spanId = createTraceId();
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 15000);
 
@@ -21,9 +11,7 @@ export const askVotePathAI = async (prompt, mode, language, context = null) => {
     const res = await fetch("/api/ask", {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        "x-trace-id": traceId,
-        "x-span-id": spanId
+        "Content-Type": "application/json"
       },
       body: JSON.stringify({ prompt, mode, language, context }),
       signal: controller.signal
