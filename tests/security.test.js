@@ -1,4 +1,5 @@
 import request from "supertest";
+import { createHmac } from "crypto";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 const mockGenerate = vi.fn();
@@ -20,6 +21,23 @@ import { app, clearRequestLog } from "../server.js";
 const originalNodeEnv = process.env.NODE_ENV;
 const originalMainKey = process.env.API_KEY_MAIN;
 const originalMetricsKey = process.env.API_KEY_METRICS;
+const originalSigningSecret = process.env.SIGNING_SECRET;
+
+function signRequest(body, path = "/api/ask") {
+  const timestamp = String(Date.now());
+  const nonce = "security-test-nonce";
+  const bodyString = JSON.stringify(body);
+  const signature = createHmac("sha256", process.env.SIGNING_SECRET)
+    .update(`POST${path}${bodyString}${timestamp}${nonce}`)
+    .digest("hex");
+
+  return {
+    "x-api-key": process.env.API_KEY_MAIN,
+    "x-signature": signature,
+    "x-timestamp": timestamp,
+    "x-nonce": nonce
+  };
+}
 
 beforeEach(() => {
   clearRequestLog();
@@ -39,6 +57,11 @@ beforeEach(() => {
 
 afterEach(() => {
   process.env.NODE_ENV = originalNodeEnv;
+  if (originalSigningSecret === undefined) {
+    delete process.env.SIGNING_SECRET;
+  } else {
+    process.env.SIGNING_SECRET = originalSigningSecret;
+  }
   if (originalMainKey === undefined) {
     delete process.env.API_KEY_MAIN;
   } else {
@@ -55,10 +78,11 @@ describe("security hardening", () => {
   it("requires an API key for API routes in production", async () => {
     process.env.NODE_ENV = "production";
     process.env.API_KEY_MAIN = "prod-secret";
+    process.env.SIGNING_SECRET = "prod-signing-secret";
 
     const res = await request(app)
       .post("/api/ask")
-      .set("x-api-key", "prod-secret")
+      .set(signRequest({ prompt: "vote" }))
       .send({ prompt: "vote" });
 
     expect(res.status).toBe(200);

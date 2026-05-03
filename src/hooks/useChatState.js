@@ -20,7 +20,10 @@ export function useChatState(isELI5, language, setAriaMessage) {
   const [isRetrying, setIsRetrying] = useState(false);
   const [showSentFeedback, setShowSentFeedback] = useState(false);
   const [copiedIndex, setCopiedIndex] = useState(null);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [streamingText, setStreamingText] = useState("");
   const chatRef = useRef(chat);
+  const requestControllerRef = useRef(null);
 
   chatRef.current = chat;
 
@@ -76,10 +79,44 @@ export function useChatState(isELI5, language, setAriaMessage) {
 
     const maxRetries = 3;
     let lastError = null;
+    requestControllerRef.current?.abort?.();
+    requestControllerRef.current = new AbortController();
+    setIsStreaming(true);
+    setStreamingText("");
+
+    let streamBuffer = "";
 
     for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
       try {
-        const parsed = await askVotePathAI(messageToSend, isELI5 ? "elis" : "normal", language, lastMessageContent);
+        const parsed = await askVotePathAI(
+          messageToSend,
+          isELI5 ? "elis" : "normal",
+          language,
+          lastMessageContent,
+          {
+            signal: requestControllerRef.current.signal,
+            stream: true,
+            onChunk: (chunk) => {
+              streamBuffer += chunk;
+              setStreamingText(streamBuffer);
+              updateChat((current) => {
+                const next = [...current];
+                next[next.length - 1] = {
+                  role: "bot",
+                  data: {
+                    title: "Typing...",
+                    simple: streamBuffer,
+                    steps: [],
+                    tips: [],
+                    source: "VotePath Assistant",
+                    _meta: { streaming: true }
+                  }
+                };
+                return next;
+              });
+            }
+          }
+        );
         const timeTaken = ((Date.now() - start) / 1000).toFixed(1);
         const safeData = normalizeMessage(parsed, timeTaken);
 
@@ -93,11 +130,16 @@ export function useChatState(isELI5, language, setAriaMessage) {
         break;
       } catch (err) {
         lastError = err;
+        if (err.name === "AbortError" || err.message === "TIMEOUT" || err.message === "Request cancelled.") {
+          setError("Request cancelled or timed out.");
+          setAriaMessage("Request cancelled or timed out");
+          break;
+        }
         const isRetryable = err.message?.includes("TIMEOUT") || err.message?.includes("RETRY_AFTER") || err.message?.includes("503");
         if (isRetryable && attempt < maxRetries) {
           // Exponential backoff with jitter: base * 2^(attempt-1) + random(0, base)
-          const baseMs = Math.pow(2, attempt - 1) * 1000;
-          const jitterMs = Math.random() * Math.min(1000, baseMs); // Jitter up to base or 1 second
+          const baseMs = process.env.NODE_ENV === "test" ? 0 : Math.pow(2, attempt - 1) * 1000;
+          const jitterMs = process.env.NODE_ENV === "test" ? 0 : Math.random() * Math.min(1000, baseMs); // Jitter up to base or 1 second
           const backoffMs = baseMs + jitterMs;
           setAriaMessage(`Retrying your request in ${Math.ceil(backoffMs / 1000)}s`);
           await new Promise((resolve) => setTimeout(resolve, backoffMs));
@@ -129,6 +171,8 @@ export function useChatState(isELI5, language, setAriaMessage) {
     }
 
     setIsLoading(false);
+    setIsStreaming(false);
+    requestControllerRef.current = null;
   }, [isELI5, isLoading, language, msg, setAriaMessage, updateChat]);
 
   const handleRetry = useCallback(async () => {
@@ -142,6 +186,17 @@ export function useChatState(isELI5, language, setAriaMessage) {
       setIsRetrying(false);
     }
   }, [msg, sendMessage, setAriaMessage]);
+
+  const cancelRequest = useCallback(() => {
+    if (requestControllerRef.current) {
+      requestControllerRef.current.abort();
+      requestControllerRef.current = null;
+      setIsLoading(false);
+      setIsStreaming(false);
+      setError("Request cancelled.");
+      setAriaMessage("Request cancelled");
+    }
+  }, [setAriaMessage]);
 
   return {
     msg,
@@ -157,7 +212,10 @@ export function useChatState(isELI5, language, setAriaMessage) {
     setRetryCountdown,
     setError,
     setIsLoading,
+    isStreaming,
+    streamingText,
     sendMessage,
-    handleRetry
+    handleRetry,
+    cancelRequest
   };
 }

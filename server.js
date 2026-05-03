@@ -1,33 +1,28 @@
-/*
- * VotePath-AI Backend Architecture
- * ================================
- * server.js:    Express app, request orchestration, routing
- * lib/cache.js: In-memory caching with TTL and LRU eviction
- * lib/validation.js: Input validation with configurable limits
- * lib/fallbacks.js: Error handling and fallback response factory
- * config.js:    Centralized configuration constants
- */
-
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import helmet from "helmet";
-import { z } from "zod";
+import session from "express-session";
+import csrf from "csurf";
+import ipRangeCheck from "ip-range-check";
+import compression from "compression";
 import path from "path";
 import { fileURLToPath } from "url";
-import compression from "compression";
+import { createHash, randomUUID } from "crypto";
 import { getFallbackResponse, FALLBACK_RESPONSES } from "./lib/fallbacks.js";
-import { validatePrompt, validateContext, validateLanguage } from "./lib/validation.js";
+import { validatePrompt, validateContext, validateLanguage, validateMode } from "./lib/validation.js";
 import { CONFIG } from "./config.js";
-import { createHash, randomUUID, timingSafeEqual } from "crypto";
 import { log } from "./lib/logger.js";
 import { redis, redisIsMemory } from "./lib/redis.js";
-import db, { pruneLogs } from "./lib/db.js";
+import db from "./lib/db.js";
 import { createTraceContext, startSpan, finishSpan } from "./lib/tracing.js";
-import { AIService } from "./lib/services/aiService.js";
+import { generateAIResponse, generateAIStream } from "./lib/services/aiService.js";
 import { CacheService } from "./lib/services/cacheService.js";
 import { DBService } from "./lib/services/dbService.js";
+import { sanitizeContext } from "./lib/services/validationService.js";
+import { createAuthMiddleware } from "./lib/middleware/auth.js";
+import { createRequestSigningMiddleware, signRequestPayload } from "./lib/middleware/security.js";
+import { createRateLimitMiddleware } from "./lib/middleware/rateLimit.js";
 
 dotenv.config();
 
@@ -35,22 +30,28 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const TRUSTED_PROXIES = ["127.0.0.1", "::1"];
-app.set("trust proxy", function (ip) {
-  return TRUSTED_PROXIES.includes(ip);
-});
+const cacheService = new CacheService(redis, CONFIG, redisIsMemory);
+const dbService = new DBService(db);
+const auth = createAuthMiddleware(redis);
+const enforceSecurity = process.env.NODE_ENV === "production" && process.env.VITEST !== "true";
+const requestSigningMiddleware = createRequestSigningMiddleware(redis);
+
+const TRUSTED_PROXY_RANGES = ["127.0.0.1/32", "::1/128"];
+app.set("trust proxy", (ip) => TRUSTED_PROXY_RANGES.some((range) => ipRangeCheck(ip, range)));
+
 const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(",").map((origin) => origin.trim()).filter(Boolean);
 if (!allowedOrigins || allowedOrigins.includes("*")) {
   if (process.env.NODE_ENV === "production") {
     throw new Error("Invalid CORS configuration");
   }
 }
+
 app.use(cors({
   origin: allowedOrigins || ["http://localhost:5173"],
-  credentials: false
+  credentials: true
 }));
-app.use(compression({ threshold: 1024 })); // Gzip responses > 1KB
-app.use(express.json());
+app.use(compression({ threshold: 1024 }));
+app.use(express.json({ limit: "1mb" }));
 app.use(helmet({
   contentSecurityPolicy: {
     useDefaults: true,
@@ -69,30 +70,27 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false
 }));
 
-// Serve static files from the React app
+app.use(session({
+  secret: process.env.SESSION_SECRET || "vote-path-session-secret",
+  resave: false,
+  saveUninitialized: true,
+  cookie: {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production"
+  }
+}));
+
+const csrfProtection = csrf({ cookie: false });
+if (enforceSecurity) {
+  app.use(csrfProtection);
+}
+
 app.use(express.static(path.join(__dirname, "dist")));
 
-// Initialize service layer
 const apiKey = process.env.GEMINI_API_KEY;
-const aiService = new AIService(apiKey);
-const cacheService = new CacheService(redis, CONFIG);
-const dbService = new DBService(db);
-
-const genAI = new GoogleGenerativeAI(apiKey || "DUMMY_KEY");
-const ResponseSchema = z.object({
-  title: z.string(),
-  steps: z.array(z.object({
-    title: z.string(),
-    desc: z.string()
-  })),
-  simple: z.string(),
-  tips: z.array(z.string()),
-  source: z.string()
-});
-
-function sanitize(input) {
-  return String(input ?? "").replace(/[{}[\]<>]/g, "");
-}
+let activeRequests = 0;
+let server;
 
 function sendEnvelope(res, statusCode, data = null, errorType = null, requestId = null) {
   return res.status(statusCode).json({
@@ -104,31 +102,19 @@ function sendEnvelope(res, statusCode, data = null, errorType = null, requestId 
   });
 }
 
-function authFailedKey(route, ip) {
-  return `auth_fail:${route}:${ip}`;
+function buildCacheKey({ prompt, context, language, mode }) {
+  return createHash("sha256")
+    .update(`${String(prompt)}::${String(context)}::${String(language)}::${String(mode)}`)
+    .digest("hex");
 }
 
-async function incrementAuthFailure(route, ip) {
-  const key = authFailedKey(route, ip);
-  try {
-    const count = await redis.incr(key);
-    if (count === 1) {
-      await redis.pexpire(key, 60000);
-    }
-    return count;
-  } catch {
-    return 1;
-  }
+function authRequestMiddleware(req, res, next) {
+  return auth.authAPI(req, res, next);
 }
 
-function constantTimeMatches(candidate, expected) {
-  const candidateHash = createHash("sha256").update(String(candidate || "")).digest();
-  const expectedHash = createHash("sha256").update(String(expected || "")).digest();
-  return candidateHash.length === expectedHash.length && timingSafeEqual(candidateHash, expectedHash);
+function metricsRequestMiddleware(req, res, next) {
+  return auth.authMetrics(req, res, next);
 }
-
-let activeRequests = 0;
-let server;
 
 app.use((req, res, next) => {
   const requestId = randomUUID();
@@ -145,106 +131,84 @@ app.use((req, res, next) => {
       const rawPrompt = req.body && typeof req.body === "object" ? req.body.prompt : null;
       const promptHash = rawPrompt ? createHash("sha256").update(String(rawPrompt)).digest("hex") : null;
       dbService.logRequest(requestId, promptHash, res.statusCode);
-      pruneLogs();
-    } catch (e) {
-      log("warn", "DB log write failed", { requestId, message: e.message });
+    } catch (error) {
+      log("warn", "DB log write failed", { requestId, message: error.message });
     }
   });
 
   next();
 });
 
-app.use("/api", async (req, res, next) => {
-  if (process.env.NODE_ENV !== "production") {
-    return next();
-  }
-
-  if (!process.env.API_KEY_MAIN) {
-    incrementAuthFailure("api", req.ip || "unknown");
-    return sendEnvelope(res, 500, null, "CONFIG_ERROR", req.requestId);
-  }
-
-  const key = req.headers["x-api-key"];
-  if (!constantTimeMatches(key, process.env.API_KEY_MAIN)) {
-    const failures = await incrementAuthFailure("api", req.ip || "unknown");
-    if (failures >= 3) {
-      return sendEnvelope(res, 429, null, "RATE_LIMITED", req.requestId);
-    }
-    return sendEnvelope(res, 401, null, "UNAUTHORIZED", req.requestId);
-  }
-
-  return next();
+app.get("/security/bootstrap", (req, res) => {
+  return sendEnvelope(res, 200, {
+    csrfToken: process.env.NODE_ENV === "production" && typeof req.csrfToken === "function" ? req.csrfToken() : null,
+    securityMode: process.env.SECURITY_MODE || (process.env.NODE_ENV === "production" ? "strict" : "test")
+  }, null, req.requestId);
 });
 
-app.use("/metrics", async (req, res, next) => {
-  if (process.env.NODE_ENV !== "production") {
-    return next();
+app.post("/security/sign", (req, res) => {
+  if (!process.env.SIGNING_SECRET) {
+    return sendEnvelope(res, 500, null, "SIGNING_SECRET_MISSING", req.requestId);
   }
 
-  if (!process.env.API_KEY_METRICS) {
-    incrementAuthFailure("metrics", req.ip || "unknown");
-    return sendEnvelope(res, 500, null, "CONFIG_ERROR", req.requestId);
+  const { method, path: requestPath, body, timestamp, nonce } = req.body || {};
+  const normalizedMethod = String(method || "").toUpperCase();
+  const normalizedPath = String(requestPath || "");
+  const normalizedTimestamp = String(timestamp || "");
+  const normalizedNonce = String(nonce || "");
+
+  if (!normalizedMethod || !normalizedPath || !normalizedTimestamp || !normalizedNonce) {
+    return sendEnvelope(res, 400, null, "INVALID_INPUT", req.requestId);
   }
 
-  const key = req.headers["x-api-key"];
-  if (!constantTimeMatches(key, process.env.API_KEY_METRICS)) {
-    const failures = await incrementAuthFailure("metrics", req.ip || "unknown");
-    if (failures >= 3) {
-      return sendEnvelope(res, 429, null, "RATE_LIMITED", req.requestId);
-    }
-    return sendEnvelope(res, 401, null, "UNAUTHORIZED", req.requestId);
-  }
+  const signature = signRequestPayload({
+    secret: process.env.SIGNING_SECRET,
+    method: normalizedMethod,
+    path: normalizedPath,
+    body: typeof body === "string" ? body : JSON.stringify(body || ""),
+    timestamp: normalizedTimestamp,
+    nonce: normalizedNonce
+  });
 
-  return next();
+  return sendEnvelope(res, 200, {
+    signature,
+    timestamp: normalizedTimestamp,
+    nonce: normalizedNonce
+  }, null, req.requestId);
 });
 
-app.use(async (req, res, next) => {
+app.use("/api", authRequestMiddleware);
+app.use("/metrics", metricsRequestMiddleware);
+app.use(requestSigningMiddleware);
+app.use((req, res, next) => {
   if (req.method !== "POST" || req.path !== "/api/ask") {
     return next();
   }
-
-  if (process.env.ENABLE_RATE_LIMIT_TEST === "false") {
-    return next();
-  }
-
-  const userIP = req.ip || "unknown";
-  const rateKey = `rate_limit:${userIP}`;
-
-  try {
-    const count = await redis.incr(rateKey);
-    if (count === 1) {
-      await redis.pexpire(rateKey, CONFIG.RATE_LIMIT_MS);
-    }
-    if (count > 1) {
-      const requestId = req.requestId || randomUUID();
-      res.setHeader("Retry-After", "2");
-      res.setHeader("X-RateLimit-Limit", "1");
-      res.setHeader("X-RateLimit-Remaining", "0");
-      const errorData = getFallbackResponse("RATE_LIMIT", requestId);
-      log("warn", "Rate limit hit", { requestId, userIP });
-      return res.status(429).json({ success: false, data: errorData, errorType: "RATE_LIMIT", statusCode: 429, requestId });
-    }
-    return next();
-  } catch (e) {
-    return next();
-  }
+  return createRateLimitMiddleware(redis)(req, res, next);
 });
 
-app.post("/api/ask", async (req, res) => {
-  try {
-    const requestId = req.requestId || randomUUID();
-    const requestSpan = startSpan("api.ask", req.traceContext || { traceId: requestId });
-    const now = Date.now();
+function writeSseEvent(res, event, data) {
+  res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
 
+app.post("/api/ask", async (req, res) => {
+  const requestId = req.requestId || randomUUID();
+  const requestSpan = startSpan("api.ask", req.traceContext || { traceId: requestId });
+  const now = Date.now();
+
+  try {
     if (!apiKey) {
       if (process.env.NODE_ENV === "production") {
         throw new Error("No API Key");
       }
+
       const fallbackResponse = {
         ...FALLBACK_RESPONSES.DEFAULT,
         lastUpdated: new Date().toISOString(),
         requestId
       };
+
       const responseData = {
         ...fallbackResponse,
         requestId,
@@ -262,90 +226,71 @@ app.post("/api/ask", async (req, res) => {
       res.setHeader("X-Cache", "miss");
       res.setHeader("Cache-Control", "private, max-age=60");
       finishSpan(requestSpan, log, { status: "fallback_no_api_key" });
-      return res.json({ success: true, data: responseData, errorType: null, statusCode: 200, requestId });
+      return sendEnvelope(res, 200, responseData, null, requestId);
     }
 
-    const { prompt, mode, language = "English", context = null } = req.body;
+    const { prompt, mode, language = "English", context = null } = req.body || {};
+    const finalMode = validateMode(mode);
 
-    // Validate inputs
     const promptValidation = validatePrompt(prompt);
     if (!promptValidation.valid) {
-      log("warn", "Invalid input", { requestId, reason: promptValidation.reason });
       const errorData = getFallbackResponse("INVALID_INPUT", requestId);
       finishSpan(requestSpan, log, { status: "invalid_input" });
-      return res.status(400).json({ success: false, data: errorData, errorType: "INVALID_INPUT", statusCode: 400, requestId });
+      return sendEnvelope(res, 400, errorData, "INVALID_INPUT", requestId);
     }
 
     const contextValidation = validateContext(context);
     if (!contextValidation.valid) {
-      log("warn", "Invalid context", { requestId });
       const errorData = getFallbackResponse("INVALID_INPUT", requestId);
       finishSpan(requestSpan, log, { status: "invalid_context" });
-      return res.status(400).json({ success: false, data: errorData, errorType: "INVALID_INPUT", statusCode: 400, requestId });
+      return sendEnvelope(res, 400, errorData, "INVALID_INPUT", requestId);
     }
 
-    if (contextValidation.trimmed) {
-      log("warn", "Context trimmed", { requestId, originalLength: contextValidation.originalLength, trimmedLength: contextValidation.value.length });
-    }
+    const finalContext = sanitizeContext(contextValidation.value || "");
+    const finalLanguage = validateLanguage(language).value;
+    const cacheKey = `cache:${buildCacheKey({ prompt, context: finalContext, language: finalLanguage, mode: finalMode })}`;
 
-    const finalContext = contextValidation.value;
-    const languageValidation = validateLanguage(language);
-    const finalLanguage = languageValidation.value;
-
-    // Generate cache key
-    const requestHash = createHash("sha256")
-      .update(`${String(prompt)}::${String(finalContext)}::${finalLanguage}::${String(mode || "")}`)
-      .digest("hex");
-    const cacheKey = `cache:${requestHash}`;
-    const inflightKey = `inflight:${requestHash}`;
-
-    // Check cache first
-    const cachedResponse = await cacheService.getCached(cacheKey);
+    const cachedResponse = await cacheService.getCache(cacheKey);
     if (cachedResponse) {
       cachedResponse.requestId = requestId;
       if (cachedResponse._meta) {
         cachedResponse._meta.cached = true;
       }
-      log("info", "Cache hit", { requestId, cacheKey });
-      finishSpan(requestSpan, log, { status: "cache_hit" });
+
       res.setHeader("X-Response-Time", String(Date.now() - now));
       res.setHeader("X-Cache", "hit");
       res.setHeader("Cache-Control", "private, max-age=60");
-      return res.json({ success: true, data: cachedResponse, errorType: null, statusCode: 200, requestId });
+      finishSpan(requestSpan, log, { status: "cache_hit" });
+      return sendEnvelope(res, 200, cachedResponse, null, requestId);
     }
 
-    // Try to acquire inflight lock
-    const lockAcquired = await cacheService.acquireInflightLock(inflightKey, requestId);
+    const lockAcquired = await cacheService.acquireLock(cacheKey, requestId);
     if (!lockAcquired) {
-      // Wait for inflight result
-      const pendingResponse = await cacheService.waitForInflightCache(cacheKey);
+      await cacheService.waitForRelease(cacheKey, 10000);
+      const pendingResponse = await cacheService.getCache(cacheKey);
       if (pendingResponse) {
         pendingResponse.requestId = requestId;
         if (pendingResponse._meta) {
           pendingResponse._meta.cached = true;
         }
-        log("info", "Request deduplication: cache materialized", { requestId, cacheKey });
-        finishSpan(requestSpan, log, { status: "deduped" });
+
         res.setHeader("X-Response-Time", String(Date.now() - now));
         res.setHeader("X-Cache", "deduped");
-        return res.json({ success: true, data: pendingResponse, errorType: null, statusCode: 200, requestId });
+        finishSpan(requestSpan, log, { status: "deduped" });
+        return sendEnvelope(res, 200, pendingResponse, null, requestId);
       }
-      // Timeout: fall through to generate
     }
 
     try {
-      // Call AI service
-      const aiResult = await aiService.generateResponse(prompt, mode, finalLanguage, finalContext);
+      const aiResult = await generateAIResponse({
+        prompt,
+        context: finalContext,
+        language: finalLanguage,
+        mode: finalMode,
+        stream: false
+      });
 
-      let parsed;
-      if (aiResult.success && aiResult.data) {
-        parsed = aiResult.data;
-      } else {
-        log("error", "AI service error", { requestId, errorType: aiResult.errorType });
-        parsed = FALLBACK_RESPONSES.DEFAULT;
-      }
-
-      // Ensure all required fields
+      let parsed = aiResult.success && aiResult.data ? aiResult.data : FALLBACK_RESPONSES.DEFAULT;
       parsed = parsed || FALLBACK_RESPONSES.DEFAULT;
       parsed.title = parsed.title || FALLBACK_RESPONSES.DEFAULT.title;
       parsed.steps = parsed.steps || FALLBACK_RESPONSES.DEFAULT.steps;
@@ -368,31 +313,168 @@ app.post("/api/ask", async (req, res) => {
         }
       };
 
-      // Cache the response
-      await cacheService.setCached(cacheKey, responseData, Math.max(1, Math.floor(CONFIG.CACHE_TTL / 1000)));
-
+      await cacheService.setCache(cacheKey, responseData, Math.max(1, Math.floor(CONFIG.CACHE_TTL / 1000)));
       res.setHeader("X-Response-Time", String(Date.now() - now));
       res.setHeader("X-Cache", "miss");
       res.setHeader("Cache-Control", "private, max-age=60");
-      log("info", "AI response", { requestId, time: Date.now() - now, title: responseData?.title });
       finishSpan(requestSpan, log, { status: "miss", responseTitle: responseData?.title });
-      return res.json({ success: true, data: responseData, errorType: null, statusCode: 200, requestId });
+      return sendEnvelope(res, 200, responseData, null, requestId);
     } finally {
-      await cacheService.releaseInflightLock(inflightKey);
+      await cacheService.releaseLock(cacheKey);
     }
-  } catch (e) {
-    const requestIdErr = req.requestId || randomUUID();
-    const errorSpan = startSpan("api.ask.error", req.traceContext || { traceId: requestIdErr });
-    log("error", "AI Error", { message: e.message, requestId: requestIdErr });
-    const errorData = getFallbackResponse("AI_ERROR", requestIdErr);
-    finishSpan(errorSpan, log, { status: "error", message: e.message });
-    return res.status(500).json({ success: false, data: errorData, errorType: "AI_ERROR", statusCode: 500, requestId: requestIdErr });
+  } catch (error) {
+    log("error", "AI Error", { message: error.message, requestId });
+    finishSpan(requestSpan, log, { status: "error", message: error.message });
+    const errorData = getFallbackResponse("AI_ERROR", requestId);
+    return sendEnvelope(res, 500, errorData, "AI_ERROR", requestId);
   }
 });
 
-// Health check endpoint for monitoring and load balancers
+app.post("/api/ask/stream", async (req, res) => {
+  const requestId = req.requestId || randomUUID();
+  const requestSpan = startSpan("api.ask.stream", req.traceContext || { traceId: requestId });
+  const now = Date.now();
+  const streamController = new AbortController();
+
+  req.on("close", () => {
+    streamController.abort();
+  });
+
+  res.status(200);
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+
+  try {
+    if (!apiKey) {
+      const responseData = {
+        ...FALLBACK_RESPONSES.DEFAULT,
+        lastUpdated: new Date().toISOString(),
+        requestId,
+        _meta: {
+          temperature: 0.3,
+          topP: 0.8,
+          responseTime: Date.now() - now,
+          cached: false,
+          timeout: 8000,
+          retryable: false
+        }
+      };
+
+      writeSseEvent(res, "message", { partial: responseData.simple || responseData.title || "" });
+      writeSseEvent(res, "end", { success: true, response: responseData, requestId });
+      finishSpan(requestSpan, log, { status: "fallback_no_api_key" });
+      return res.end();
+    }
+
+    const { prompt, mode, language = "English", context = null } = req.body || {};
+    const finalMode = validateMode(mode);
+
+    const promptValidation = validatePrompt(prompt);
+    if (!promptValidation.valid) {
+      const errorData = getFallbackResponse("INVALID_INPUT", requestId);
+      finishSpan(requestSpan, log, { status: "invalid_input" });
+      writeSseEvent(res, "end", { success: false, errorType: "INVALID_INPUT", response: errorData, requestId });
+      return res.end();
+    }
+
+    const contextValidation = validateContext(context);
+    if (!contextValidation.valid) {
+      const errorData = getFallbackResponse("INVALID_INPUT", requestId);
+      finishSpan(requestSpan, log, { status: "invalid_context" });
+      writeSseEvent(res, "end", { success: false, errorType: "INVALID_INPUT", response: errorData, requestId });
+      return res.end();
+    }
+
+    const finalContext = sanitizeContext(contextValidation.value || "");
+    const finalLanguage = validateLanguage(language).value;
+    const cacheKey = `cache:${buildCacheKey({ prompt, context: finalContext, language: finalLanguage, mode: finalMode })}`;
+
+    const cachedResponse = await cacheService.getCache(cacheKey);
+    if (cachedResponse) {
+      cachedResponse.requestId = requestId;
+      if (cachedResponse._meta) {
+        cachedResponse._meta.cached = true;
+      }
+
+      writeSseEvent(res, "message", { partial: cachedResponse.simple || cachedResponse.title || "" });
+      writeSseEvent(res, "end", { success: true, response: cachedResponse, requestId });
+      finishSpan(requestSpan, log, { status: "cache_hit" });
+      return res.end();
+    }
+
+    const lockAcquired = await cacheService.acquireLock(cacheKey, requestId);
+    if (!lockAcquired) {
+      await cacheService.waitForRelease(cacheKey, 10000);
+      const pendingResponse = await cacheService.getCache(cacheKey);
+      if (pendingResponse) {
+        pendingResponse.requestId = requestId;
+        if (pendingResponse._meta) {
+          pendingResponse._meta.cached = true;
+        }
+
+        writeSseEvent(res, "message", { partial: pendingResponse.simple || pendingResponse.title || "" });
+        writeSseEvent(res, "end", { success: true, response: pendingResponse, requestId });
+        finishSpan(requestSpan, log, { status: "deduped" });
+        return res.end();
+      }
+    }
+
+    try {
+      let accumulated = "";
+      for await (const event of generateAIStream({
+        prompt,
+        context: finalContext,
+        language: finalLanguage,
+        mode: finalMode,
+        signal: streamController.signal
+      })) {
+        if (event.type === "chunk") {
+          accumulated += event.text || "";
+          writeSseEvent(res, "message", { partial: event.text || "", accumulated });
+        } else if (event.type === "end") {
+          const responseData = {
+            ...(event.response || FALLBACK_RESPONSES.DEFAULT),
+            requestId,
+            _meta: {
+              temperature: 0.3,
+              topP: 0.8,
+              responseTime: Date.now() - now,
+              cached: false,
+              timeout: 8000,
+              retryable: false
+            }
+          };
+
+          await cacheService.setCache(cacheKey, responseData, Math.max(1, Math.floor(CONFIG.CACHE_TTL / 1000)));
+          writeSseEvent(res, "end", { success: true, response: responseData, requestId });
+          finishSpan(requestSpan, log, { status: "stream_complete", responseTitle: responseData?.title });
+          return res.end();
+        } else if (event.type === "error") {
+          const errorData = getFallbackResponse(event.errorType || "AI_ERROR", requestId);
+          writeSseEvent(res, "end", { success: false, errorType: event.errorType || "AI_ERROR", response: errorData, requestId });
+          finishSpan(requestSpan, log, { status: "stream_error", errorType: event.errorType || "AI_ERROR" });
+          return res.end();
+        }
+      }
+    } finally {
+      await cacheService.releaseLock(cacheKey);
+    }
+  } catch (error) {
+    log("error", "AI Stream Error", { message: error.message, requestId });
+    finishSpan(requestSpan, log, { status: "error", message: error.message });
+    writeSseEvent(res, "end", { success: false, errorType: "AI_ERROR", requestId });
+    return res.end();
+  }
+});
+
 app.get("/health", (req, res) => {
-  return sendEnvelope(res, 200, { status: "ok", uptime: process.uptime(), timestamp: new Date().toISOString() }, null, req.requestId);
+  return sendEnvelope(res, 200, {
+    status: "ok",
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString()
+  }, null, req.requestId);
 });
 
 app.get("/ready", (req, res) => {
@@ -403,31 +485,33 @@ app.get("/ready", (req, res) => {
   return sendEnvelope(res, 200, { ready: true }, null, req.requestId);
 });
 
-// Metrics endpoint for lightweight observability
 app.get("/metrics", async (req, res) => {
   try {
     const cacheKeys = await redis.keys("cache:*");
-    const requestCountRow = db.prepare("SELECT COUNT(*) AS count FROM logs").get();
+    const logStats = dbService.getLogStats();
     return sendEnvelope(res, 200, {
       uptime: process.uptime(),
-      requests: requestCountRow?.count || 0,
+      requests: logStats.count,
       cacheSize: Array.isArray(cacheKeys) ? cacheKeys.length : 0
     }, null, req.requestId);
-  } catch (e) {
+  } catch (error) {
     return sendEnvelope(res, 500, null, "METRICS_UNAVAILABLE", req.requestId);
   }
 });
 
-// The "catchall" handler: for any request that doesn't
-// match one above, send back React's index.html file.
+app.use((err, req, res, next) => {
+  if (err.code === "EBADCSRFTOKEN") {
+    return sendEnvelope(res, 403, null, "CSRF_INVALID", req.requestId);
+  }
+  return next(err);
+});
+
 app.use((req, res) => {
   res.sendFile(path.join(__dirname, "dist", "index.html"));
 });
 
-// Export app for tests
 export { app };
 
-// Test helper to clear in-memory request log between test cases
 export function clearRequestLog() {
   try {
     if (redisIsMemory) {
@@ -441,32 +525,30 @@ export function clearRequestLog() {
         redis.del(key);
       }
     }
-  } catch (e) {
+  } catch {
     // ignore
   }
 }
 
+setTimeout(async () => {
+  await cacheService.warmCommonPrompts([
+    { key: `cache:${buildCacheKey({ prompt: "What documents do I need to vote?", context: null, language: "English", mode: "normal" })}`, value: { ...FALLBACK_RESPONSES.DEFAULT, title: "Voting Basics", simple: "Start with voter registration and your polling booth.", source: "Election Commission of India" } },
+    { key: `cache:${buildCacheKey({ prompt: "Generate my voting checklist", context: null, language: "English", mode: "normal" })}`, value: { ...FALLBACK_RESPONSES.DEFAULT, title: "Voting Checklist", simple: "Carry your ID, verify your roll, and reach the booth on time.", source: "Election Commission of India" } }
+  ]);
+}, 1500);
+
 if (process.env.NODE_ENV !== "test") {
   const PORT = process.env.PORT || 3000;
-  server = app.listen(PORT, () => log('info', `Server running on port ${PORT}`, { port: PORT }));
-  
-  // Graceful shutdown handler for SIGTERM (docker stop, kubernetes termination, etc.)
+  server = app.listen(PORT, () => log("info", `Server running on port ${PORT}`, { port: PORT }));
+
   process.on("SIGTERM", () => {
-    log('info', 'SIGTERM received, shutting down gracefully...');
+    log("info", "SIGTERM received, shutting down gracefully...");
     const shutdown = async () => {
       while (activeRequests > 0) {
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
-
-      if (server) {
-        server.close(() => process.exit(0));
-        return;
-      }
-
-      process.exit(0);
+      server.close(() => process.exit(0));
     };
-
-    server?.close(() => process.exit(0));
-    shutdown().catch(() => process.exit(0));
+    shutdown();
   });
 }

@@ -61,11 +61,11 @@ describe("Chat Component", () => {
     // Wait for retry button to appear after error
     await waitFor(
       () => {
-        expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: /retry in 3 seconds/i })).toBeInTheDocument();
       },
       { timeout: 6000 }
     );
-  });
+  }, 10000);
 
   it("uses the latest chat state when sending a follow-up message", async () => {
     askVotePathAI.mockResolvedValue({

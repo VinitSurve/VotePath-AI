@@ -12,6 +12,7 @@ export default memo(function Chat() {
   const [language, setLanguage] = useState("English");
   const inputRef = useRef(null);
   const endOfMessagesRef = useRef(null);
+  const wasLoadingRef = useRef(false);
 
   const {
     isOnline,
@@ -27,6 +28,8 @@ export default memo(function Chat() {
     setMsg,
     chat,
     isLoading,
+    isStreaming,
+    streamingText,
     error,
     retryCountdown,
     isRetrying,
@@ -34,7 +37,8 @@ export default memo(function Chat() {
     copiedIndex,
     setCopiedIndex,
     sendMessage,
-    handleRetry
+    handleRetry,
+    cancelRequest
   } = useChatState(isELI5, language, setAriaMessage);
 
   const {
@@ -52,6 +56,13 @@ export default memo(function Chat() {
     scrollToBottom();
   }, [chat, isLoading]);
 
+  useEffect(() => {
+    if (wasLoadingRef.current && !isLoading) {
+      inputRef.current?.focus();
+    }
+    wasLoadingRef.current = isLoading;
+  }, [isLoading]);
+
   const suggestions = [
     "What documents do I need to vote?",
     "Generate my voting checklist",
@@ -60,7 +71,7 @@ export default memo(function Chat() {
 
   return (
     <main role="main">
-      <div tabIndex="0" className="max-w-3xl mx-auto h-[85vh] flex flex-col bg-gradient-to-br from-indigo-50 via-white to-blue-50 backdrop-blur-xl rounded-2xl shadow-xl border border-white/50 overflow-hidden relative">
+      <div tabIndex="0" className="max-w-3xl mx-auto h-[85vh] flex flex-col bg-gradient-to-br from-indigo-50 via-white to-blue-50 backdrop-blur-xl rounded-2xl shadow-xl border border-white/50 overflow-hidden relative" role="application" aria-label="VotePath AI chat interface">
         <div aria-live="polite" role="status" className="sr-only">{ariaMessage}</div>
         <div className="bg-white/50 p-4 border-b border-gray-100 flex items-center justify-between backdrop-blur-md sticky top-0 z-10">
           <div className="flex items-center space-x-3">
@@ -96,6 +107,8 @@ export default memo(function Chat() {
         <ChatConversation
           chat={chat}
           isLoading={isLoading}
+          isStreaming={isStreaming}
+          streamingText={streamingText}
           error={error}
           retryCountdown={retryCountdown}
           onRetry={handleRetry}
@@ -136,7 +149,7 @@ export default memo(function Chat() {
               </button>
             </div>
           )}
-          <form onSubmit={(e) => { e.preventDefault(); sendMessage(); }} className="relative flex items-center bg-gray-50 rounded-2xl focus-within:ring-4 focus-within:ring-primary-500/20 transition-all border border-gray-200 focus-within:border-primary-400 shadow-inner">
+          <form onSubmit={(e) => { e.preventDefault(); sendMessage(); }} className="relative flex items-center bg-gray-50 rounded-2xl focus-within:ring-4 focus-within:ring-primary-500/20 transition-all border border-gray-200 focus-within:border-primary-400 shadow-inner" aria-label="Chat input form">
             <button
               type="button"
               onClick={() => startListening((transcript) => setMsg(transcript))}
@@ -171,6 +184,16 @@ export default memo(function Chat() {
             >
               <Send size={18} aria-hidden="true" />
             </button>
+            {isLoading && (
+              <button
+                type="button"
+                onClick={cancelRequest}
+                className="absolute right-14 px-3 py-1.5 bg-white text-gray-700 rounded-xl border border-gray-200 hover:border-gray-300 hover:bg-gray-50 text-xs font-semibold focus:ring-2 focus:ring-primary-500"
+                aria-label="Cancel request"
+              >
+                Cancel
+              </button>
+            )}
           </form>
         </div>
 

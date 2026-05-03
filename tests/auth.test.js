@@ -1,4 +1,5 @@
 import request from "supertest";
+import { createHmac, randomUUID } from "crypto";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 const mockGenerate = vi.fn();
@@ -19,6 +20,23 @@ import { app, clearRequestLog } from "../server.js";
 
 const originalNodeEnv = process.env.NODE_ENV;
 const originalApiKey = process.env.API_KEY_MAIN;
+const originalSigningSecret = process.env.SIGNING_SECRET;
+
+function signRequest(body, path = "/api/ask") {
+  const timestamp = String(Date.now());
+  const nonce = randomUUID();
+  const bodyString = JSON.stringify(body);
+  const signature = createHmac("sha256", process.env.SIGNING_SECRET)
+    .update(`POST${path}${bodyString}${timestamp}${nonce}`)
+    .digest("hex");
+
+  return {
+    "x-api-key": process.env.API_KEY_MAIN,
+    "x-signature": signature,
+    "x-timestamp": timestamp,
+    "x-nonce": nonce
+  };
+}
 
 beforeEach(() => {
   clearRequestLog();
@@ -40,6 +58,11 @@ beforeEach(() => {
 
 afterEach(() => {
   process.env.NODE_ENV = originalNodeEnv;
+  if (originalSigningSecret === undefined) {
+    delete process.env.SIGNING_SECRET;
+  } else {
+    process.env.SIGNING_SECRET = originalSigningSecret;
+  }
   if (originalApiKey === undefined) {
     delete process.env.API_KEY_MAIN;
   } else {
@@ -56,9 +79,10 @@ describe("API auth middleware", () => {
   });
 
   it("allows requests with the configured x-api-key", async () => {
+    process.env.SIGNING_SECRET = "auth-test-signing-secret";
     const res = await request(app)
       .post("/api/ask")
-      .set("x-api-key", "test-api-key")
+      .set(signRequest({ prompt: "vote" }))
       .send({ prompt: "vote" });
 
     expect(res.status).toBe(200);

@@ -128,6 +128,8 @@ function ChatBubble({ item, index, onSpeak, speakingIndex, copiedIndex, onCopy }
 function ChatConversation({
   chat,
   isLoading,
+  isStreaming,
+  streamingText,
   error,
   retryCountdown,
   onRetry,
@@ -139,7 +141,7 @@ function ChatConversation({
   endOfMessagesRef
 }) {
   return (
-    <section aria-label="Chat conversation" className="flex-1 overflow-y-auto p-4 space-y-6 bg-gradient-to-b from-transparent to-gray-50/30">
+    <section aria-label="Chat conversation" role="log" aria-live="polite" aria-relevant="additions text" className="flex-1 overflow-y-auto p-4 space-y-6 bg-gradient-to-b from-transparent to-gray-50/30">
       <AnimatePresence initial={false}>
         {chat.map((item, index) => (
           <ChatBubble
@@ -153,8 +155,8 @@ function ChatConversation({
           />
         ))}
 
-        {isLoading && (
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-start">
+        {(isLoading || isStreaming) && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-start" role="status" aria-live="polite">
             <div className="flex flex-row max-w-[80%] items-center">
               <div className="flex-shrink-0 flex items-center justify-center h-8 w-8 rounded-full bg-primary-100 mr-3 shadow-sm">
                 <Bot size={16} className="text-primary-600" />
@@ -163,13 +165,15 @@ function ChatConversation({
                 <div className="w-48 h-3 bg-gray-200 rounded-md animate-pulse" />
                 <div className="w-32 h-3 bg-gray-200 rounded-md animate-pulse" />
                 <div className="w-40 h-3 bg-gray-200 rounded-md animate-pulse" />
+                {isStreaming && streamingText && <div className="text-xs text-gray-500 mt-2">{streamingText}</div>}
+                {isStreaming && !streamingText && <div className="text-xs text-gray-500 mt-2">typing...</div>}
               </div>
             </div>
           </motion.div>
         )}
 
         {chat.length === 0 && !isLoading && !error && (
-          <div className="w-full text-center text-gray-400 mt-10">Ask anything about voting in India 🇮🇳</div>
+          <div className="w-full text-center text-gray-400 mt-10" role="status">Ask anything about voting in India 🇮🇳</div>
         )}
 
         {chat.length === 0 && error && (
