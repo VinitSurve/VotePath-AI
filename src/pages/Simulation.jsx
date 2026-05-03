@@ -152,8 +152,8 @@ export default function Simulation() {
                 <button
                   key={idx}
                   onClick={() => handleOptionClick(idx)}
-                  disabled={showFeedback}
-                  className={`w-full text-left p-4 rounded-xl border-2 transition-all duration-300 font-medium ${btnClass}`}
+                    disabled={showFeedback}
+                    className={`w-full text-left p-4 rounded-xl border-2 transition-all duration-300 font-medium ${btnClass} disabled:opacity-40 disabled:bg-gray-400 disabled:cursor-not-allowed focus:ring-2 focus:ring-primary-500`}
                   aria-pressed={idx === selectedOption}
                 >
                   {option.text}

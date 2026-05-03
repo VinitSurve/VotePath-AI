@@ -9,6 +9,7 @@ export default function Eligibility() {
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
   const [ageError, setAgeError] = useState('');
+  const [isProcessing, setIsProcessing] = useState(false);
 
   const validateAge = (value) => {
     if (!value) {
@@ -23,6 +24,7 @@ export default function Eligibility() {
   const checkEligibility = (e) => {
     e.preventDefault();
     setError('');
+    setIsProcessing(true);
 
     if (!age || isNaN(age) || age <= 0 || age > 130) {
       setError("Please enter a valid age.");
@@ -59,6 +61,7 @@ export default function Eligibility() {
         desc: `You must be at least 18 years old to vote. You have ${18 - numAge} more years to go!`,
         nextSteps: ["Learn about the democratic process", "Stay informed about current events"]
       });
+      setIsProcessing(false);
     }
   };
 
@@ -71,6 +74,13 @@ export default function Eligibility() {
 
       <div className="card shadow-md">
         <form onSubmit={checkEligibility} className="space-y-6">
+          {isProcessing && (
+            <div className="p-6 border rounded-2xl bg-gray-50 animate-pulse">
+              <div className="h-4 bg-gray-200 rounded w-3/4 mb-3" />
+              <div className="h-3 bg-gray-200 rounded w-1/2 mb-2" />
+              <div className="h-3 bg-gray-200 rounded w-5/6" />
+            </div>
+          )}
           <div>
             <label htmlFor="age" className="block text-sm font-medium text-gray-700 mb-2">
               What is your age? <span className="text-red-500" aria-hidden="true">*</span>
@@ -161,7 +171,10 @@ export default function Eligibility() {
           >
             <div className="flex items-start space-x-4">
               {result.status === 'eligible' ? (
-                <CheckCircle2 className="text-green-600 mt-1" size={28} />
+                    <div className="flex items-center">
+                      <CheckCircle2 className="text-green-600 mt-1" size={28} />
+                      <div className="ml-3 text-3xl text-green-600 font-extrabold">✓</div>
+                    </div>
               ) : (
                 <XCircle className="text-orange-600 mt-1" size={28} />
               )}

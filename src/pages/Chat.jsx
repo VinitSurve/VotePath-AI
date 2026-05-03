@@ -27,6 +27,8 @@ export default memo(function Chat() {
   const [isServerReachable, setIsServerReachable] = useState(true);
     const [showSentFeedback, setShowSentFeedback] = useState(false);
     const [showOfflineBanner, setShowOfflineBanner] = useState(false);
+    const [isRetrying, setIsRetrying] = useState(false);
+    const [copiedIndex, setCopiedIndex] = useState(null);
   
   const { isELI5 } = useExplain();
   const endOfMessagesRef = useRef(null);
@@ -56,6 +58,23 @@ export default memo(function Chat() {
     const timer = setTimeout(() => setRetryCountdown(c => c - 1), 1000);
     return () => clearTimeout(timer);
   }, [retryCountdown]);
+
+  // Offline toast handling
+  useEffect(() => {
+    const onOffline = () => {
+      setShowOfflineBanner(true);
+    };
+    const onOnline = () => {
+      setShowOfflineBanner(false);
+      setError(null);
+    };
+    window.addEventListener('offline', onOffline);
+    window.addEventListener('online', onOnline);
+    return () => {
+      window.removeEventListener('offline', onOffline);
+      window.removeEventListener('online', onOnline);
+    };
+  }, []);
 
   useEffect(() => {
     const checkConnectivity = async () => {
@@ -109,7 +128,12 @@ export default memo(function Chat() {
   const handleRetry = useCallback(async () => {
     setError(null);
     setRetryCountdown(0);
-    await handleSend(null, msg);
+    setIsRetrying(true);
+    try {
+      await handleSend(null, msg);
+    } finally {
+      setIsRetrying(false);
+    }
   }, [msg]);
 
   const handleSend = useCallback(async (e, overrideMsg = null) => {
@@ -392,6 +416,28 @@ export default memo(function Chat() {
                     )}
                   </div>
                 )}
+                {/* Copy button for bot messages */}
+                {c.role === 'bot' && (
+                  <div className="ml-14 mt-2 flex items-center space-x-2">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText((c.data.simple || c.data.title || '').toString());
+                          setCopiedIndex(i);
+                          setTimeout(() => setCopiedIndex(null), 2000);
+                        } catch {}
+                      }}
+                      className="text-xs bg-gray-100 px-2 py-1 rounded-md hover:bg-gray-200 transition-all"
+                      aria-label="Copy message"
+                    >
+                      Copy
+                    </button>
+                    {copiedIndex === i && (
+                      <span className="text-xs text-green-600">Copied ✓</span>
+                    )}
+                  </div>
+                )}
                 {/* Rate limit / error type banner inside message */}
                 {c.role === 'bot' && c.data.errorType === 'RATE_LIMIT' && (
                   <div className="text-xs text-red-600 bg-red-50 border border-red-100 px-3 py-1 mt-2 rounded-md ml-14">Too many requests. Please wait a few seconds.</div>
@@ -402,17 +448,17 @@ export default memo(function Chat() {
           
           {isLoading && (
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-start">
-               <div className="flex flex-row max-w-[80%] items-center">
-                 <div className="flex-shrink-0 flex items-center justify-center h-8 w-8 rounded-full bg-primary-100 mr-3 shadow-sm">
-                    <Bot size={16} className="text-primary-600" />
-                 </div>
-                 <div className="p-4 bg-white border border-gray-100 rounded-2xl rounded-tl-sm shadow-md flex space-x-2 items-center">
-                    <div className="w-2 h-2 bg-primary-400 rounded-full animate-bounce"></div>
-                    <div className="w-2 h-2 bg-primary-400 rounded-full animate-bounce" style={{ animationDelay: '0.15s' }}></div>
-                    <div className="w-2 h-2 bg-primary-400 rounded-full animate-bounce" style={{ animationDelay: '0.3s' }}></div>
-                    <span className="text-sm text-gray-400 ml-2 font-medium">Processing your question...</span>
-                 </div>
-               </div>
+              <div className="flex flex-row max-w-[80%] items-center">
+                <div className="flex-shrink-0 flex items-center justify-center h-8 w-8 rounded-full bg-primary-100 mr-3 shadow-sm">
+                  <Bot size={16} className="text-primary-600" />
+                </div>
+                {/* Skeleton bubble for loading */}
+                <div className="p-4 rounded-2xl rounded-tl-sm shadow-md flex flex-col space-y-2 items-start">
+                  <div className="w-48 h-3 bg-gray-200 rounded-md animate-pulse" />
+                  <div className="w-32 h-3 bg-gray-200 rounded-md animate-pulse" />
+                  <div className="w-40 h-3 bg-gray-200 rounded-md animate-pulse" />
+                </div>
+              </div>
             </motion.div>
           )}
 
@@ -440,10 +486,10 @@ export default memo(function Chat() {
               <button
                 onClick={handleRetry}
                 disabled={retryCountdown > 0 || isLoading}
-                className="px-3 py-1 bg-red-600 text-white rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed hover:bg-red-700 transition-colors"
+                className={`px-3 py-1 bg-red-600 text-white rounded-lg text-sm font-medium disabled:opacity-40 disabled:bg-gray-400 disabled:cursor-not-allowed hover:bg-red-700 transition-colors ${retryCountdown > 0 || isRetrying ? 'animate-pulse' : ''}`}
                 aria-label="Retry request"
               >
-                Retry
+                {isRetrying ? 'Retrying...' : (retryCountdown > 0 ? `Retry (${retryCountdown}s)` : 'Retry')}
               </button>
             </motion.div>
           )}
@@ -460,7 +506,7 @@ export default memo(function Chat() {
                 type="button"
                 key={i} 
                 onClick={() => handleSend(null, s)}
-                className="text-xs bg-white border border-gray-200 hover:border-primary-300 hover:bg-primary-50 text-gray-700 px-4 py-2 rounded-xl transition-all flex items-center font-bold shadow-sm hover:shadow active:scale-95"
+                className="text-xs bg-white border border-gray-200 hover:border-primary-300 hover:bg-primary-50 text-gray-700 px-4 py-2 rounded-xl transition-all flex items-center font-bold shadow-sm hover:shadow active:scale-95 hover:scale-105 cursor-pointer focus:ring-2 focus:ring-primary-500"
               >
                 <Sparkles size={14} className="mr-1.5 text-primary-500" /> {s}
               </button>
@@ -495,7 +541,7 @@ export default memo(function Chat() {
             value={msg}
             onChange={(e) => setMsg(e.target.value)}
             placeholder={isListening ? "Listening..." : "Ask VotePath AI..."}
-            className="w-full bg-transparent text-gray-900 py-4 pl-14 pr-14 outline-none font-medium text-[15px]"
+            className="w-full bg-transparent text-gray-900 py-4 pl-14 pr-14 outline-none font-medium text-[15px] focus:ring-2 focus:ring-primary-500"
             id="chat-input"
             disabled={isLoading || isListening}
             aria-label="Enter your question"
@@ -506,17 +552,35 @@ export default memo(function Chat() {
               }
             }}
           />
-          <p id="helper" className="sr-only">Press Enter to send your question</p>
+          <p id="helper" className="text-xs text-gray-500 ml-2">Press Enter to send</p>
+          {/* Input disabled reason */}
+          {(isLoading || isListening) && (
+            <div className="absolute left-1/2 -translate-x-1/2 -bottom-6 text-xs text-gray-500">Waiting for AI response...</div>
+          )}
           <button 
             type="submit" 
             disabled={!msg.trim() || isLoading}
-              className="absolute right-2 p-2.5 bg-primary-600 text-white hover:bg-primary-700 rounded-xl disabled:opacity-40 disabled:bg-gray-400 disabled:cursor-not-allowed transition-all shadow-md active:scale-95 my-1"
+              className="absolute right-2 p-2.5 bg-primary-600 text-white hover:bg-primary-700 rounded-xl disabled:opacity-40 disabled:bg-gray-400 disabled:cursor-not-allowed transition-all shadow-md active:scale-95 my-1 focus:ring-2 focus:ring-primary-500"
             aria-label="Send message"
           >
             <Send size={18} aria-hidden="true" />
           </button>
         </form>
       </div>
+      {/* Sticky loader near input to keep loading visible while scrolling */}
+      <AnimatePresence>
+        {isLoading && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed bottom-28 left-1/2 -translate-x-1/2 bg-white/90 px-3 py-2 rounded-full shadow-lg z-50 flex items-center space-x-2" aria-live="polite">
+            <div className="w-3 h-3 bg-primary-400 rounded-full animate-pulse" />
+            <div className="text-sm text-gray-700">Processing your question...</div>
+          </motion.div>
+        )}
+        {showOfflineBanner && (
+          <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="fixed top-20 left-1/2 -translate-x-1/2 bg-red-600 text-white px-3 py-2 rounded-md shadow-lg z-50">
+            You are offline
+          </motion.div>
+        )}
+      </AnimatePresence>
       
         {/* Sent feedback toast */}
         <AnimatePresence>

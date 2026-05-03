@@ -4,10 +4,15 @@ import { Baby, GraduationCap, Vote } from 'lucide-react';
 import { motion } from 'framer-motion';
 
 export default function Navbar() {
-  const { isELI5, setIsELI5 } = useExplain();
+  const { isELI5, setIsELI5, isSwitching, toggleELI5 } = useExplain();
   const location = useLocation();
   
-  const toggleELI5 = () => setIsELI5(!isELI5);
+  // use context-provided toggle that shows transient switching label
+  // keep a local fallback if toggleELI5 not provided
+  const handleToggle = () => {
+    if (typeof toggleELI5 === 'function') return toggleELI5();
+    return setIsELI5(!isELI5);
+  };
 
   return (
     <nav className="sticky top-0 z-50 bg-white/80 backdrop-blur-md border-b border-gray-200 shadow-sm">
@@ -20,7 +25,7 @@ export default function Navbar() {
           
           <div className="flex items-center space-x-4">
             <button
-              onClick={toggleELI5}
+              onClick={handleToggle}
               className={`flex items-center space-x-2 px-3 py-1.5 rounded-full border transition-all duration-300 ${
                 isELI5 
                   ? 'bg-yellow-100 border-yellow-300 text-yellow-800 shadow-sm' 
@@ -40,6 +45,9 @@ export default function Navbar() {
                 </>
               )}
             </button>
+            {isSwitching && (
+              <div className="ml-3 text-sm text-gray-500 italic">Switching explanation mode...</div>
+            )}
           </div>
         </div>
       </div>
