@@ -15,7 +15,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import path from "path";
 import { fileURLToPath } from "url";
 import compression from "compression";
-import { getCachedResponse, setCachedResponse } from "./lib/cache.js";
+import { getCachedResponse, setCachedResponse, getCacheSize } from "./lib/cache.js";
 import { getFallbackResponse, FALLBACK_RESPONSES } from "./lib/fallbacks.js";
 import { validatePrompt, validateContext, validateLanguage } from "./lib/validation.js";
 import { CONFIG } from "./config.js";
@@ -289,6 +289,19 @@ User: "${prompt}"
 // Health check endpoint for monitoring and load balancers
 app.get("/health", (req, res) => {
   res.json({ status: "ok", uptime: process.uptime(), timestamp: new Date().toISOString() });
+});
+
+// Metrics endpoint for lightweight observability
+app.get("/metrics", (req, res) => {
+  try {
+    res.json({
+      uptime: process.uptime(),
+      requests: requestLog.size,
+      cacheSize: typeof getCacheSize === 'function' ? getCacheSize() : null
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'metrics_unavailable' });
+  }
 });
 
 // The "catchall" handler: for any request that doesn't
